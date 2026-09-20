@@ -107,11 +107,19 @@ class UploadRequest {
 }
 
 /// Parameters for a download.
+///
+/// **Resume is automatic.** The transport stages into `<localPath>.part` and
+/// resumes from whatever that file holds, so a caller never tracks byte
+/// offsets. Letting the caller supply the offset instead would allow a
+/// mismatch, and writing at the wrong offset produces a file that looks
+/// plausible but is corrupt — the worst possible failure mode for a storage
+/// app. Disk is the source of truth.
+///
+/// To start a download over deliberately, delete `<localPath>.part` first.
 class DownloadRequest {
   const DownloadRequest({
     required this.remotePath,
     required this.localPath,
-    this.resumeFromBytes = 0,
     this.onProgress,
     this.cancelSignal,
   });
@@ -119,11 +127,19 @@ class DownloadRequest {
   final String remotePath;
   final String localPath;
 
-  /// Byte offset to resume from. Non-zero requires `canResumeDownload`.
-  final int resumeFromBytes;
-
+  /// Reports bytes written so far, including any resumed prefix.
   final void Function(int bytesDone, int totalBytes)? onProgress;
+
+  /// Cooperative cancellation. Transports must honour this at chunk
+  /// boundaries rather than ignoring it.
   final Future<void>? cancelSignal;
+
+  /// Where partial data is staged while the download is in flight.
+  ///
+  /// Exposed because the app needs it for cache management and for offering
+  /// the user a "start over" action — but the transport, not the caller, owns
+  /// the resume offset.
+  String get stagingPath => '$localPath.part';
 }
 
 /// The Puter filesystem, as the application needs it.

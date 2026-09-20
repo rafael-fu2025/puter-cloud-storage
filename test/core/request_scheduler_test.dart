@@ -1,12 +1,12 @@
 import 'dart:math';
 
+import 'package:puter_cloud_storage/core/config/app_config.dart';
+import 'package:puter_cloud_storage/core/error/puter_exception.dart';
+import 'package:puter_cloud_storage/core/network/request_scheduler.dart';
 // package:test rather than flutter_test, so this runs under `dart test` with no
 // Flutter harness. lib/core is deliberately Flutter-free for exactly this
 // reason — see the note at the top of app_config.dart.
 import 'package:test/test.dart';
-import 'package:puter_cloud_storage/core/config/app_config.dart';
-import 'package:puter_cloud_storage/core/error/puter_exception.dart';
-import 'package:puter_cloud_storage/core/network/request_scheduler.dart';
 
 /// Run a scheduled operation, capturing either its value or its error.
 Future<Object?> _capture(Future<void> future) =>

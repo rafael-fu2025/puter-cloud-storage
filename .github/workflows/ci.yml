@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  # Keep CI deterministic; the lockfile pins the rest.
+  PUB_ENVIRONMENT: ci
+
+jobs:
+  verify:
+    name: Analyze, test and verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.44.8'
+          channel: stable
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Check formatting
+        # Non-blocking for now: formatting churn would otherwise bury real
+        # failures during early development.
+        continue-on-error: true
+        run: dart format --output=none --set-exit-if-changed lib test tool
+
+      - name: Static analysis
+        run: flutter analyze --no-pub
+
+      - name: Widget and unit tests
+        run: flutter test --no-pub
+
+      # These two exist because `flutter test` and `dart test` each fail in some
+      # environments (flutter_tester's WebSocket upgrade; the native-assets build
+      # hook). They depend on nothing but the Dart VM, so they always run — which
+      # makes them the reliable signal.
+      - name: Verify core (error taxonomy, scheduler, rate limits)
+        run: dart run tool/verify/verify_core.dart
+
+      # Drives WebDavTransport against a real HTTP server on loopback:
+      # 207 partial failures, 413 quota, 429 backoff, 412 overwrite refusal,
+      # Range resume, and a server that ignores Range.
+      - name: Verify transport (WebDAV contract)
+        run: dart run tool/verify/verify_transport.dart
+
+  secret-scan:
+    name: Scan for committed credentials
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The Puter auth token grants full access to the account, so a committed
+      # token is a full compromise with no scope limit and no expiry. This is a
+      # backstop for docs/security.md §2 item 4, not the primary defence.
+      - name: Fail if a credential-shaped string is present
+        run: |
+          set -euo pipefail
+          # Basic-auth payloads, bearer tokens, and obvious assignments.
+          PATTERN='(Basic [A-Za-z0-9+/=]{20,}|Bearer [A-Za-z0-9._~+/=-]{20,}|PUTER_AUTH_TOKEN[[:space:]]*=[[:space:]]*[^[:space:]]{10,})'
+          if git grep -nIE "$PATTERN" -- . ':!*.lock' ':!docs/**'; then
+            echo "::error::Possible credential committed. Revoke it at https://puter.com/dashboard#account before doing anything else."
+            exit 1
+          fi
+          echo "No credential-shaped strings found."

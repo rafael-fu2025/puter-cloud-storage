@@ -259,6 +259,19 @@ class WebDavTransport implements PuterTransport {
       items: window,
       cursor: nextOffset < sorted.length ? '$nextOffset' : null,
       total: request.includeTotal ? sorted.length : null,
+      // A 207 can succeed overall while individual entries fail. Carrying these
+      // up is the difference between "this folder has 3 files" and "this folder
+      // has 6 files, 3 of which could not be read" — the user deserves the
+      // second answer.
+      failures: parsed.failures
+          .map(
+            (failure) => NodeFailure(
+              path: failure.path,
+              message: failure.message,
+              statusCode: failure.statusCode,
+            ),
+          )
+          .toList(growable: false),
     );
   }
 
@@ -476,20 +489,36 @@ class WebDavTransport implements PuterTransport {
 
     // Streamed body: never load the file into memory. This is the whole reason
     // WebDAV was chosen over the WebView bridge.
+    final total = file.lengthSync();
+
+    // Count bytes as they leave rather than relying on Dio's `onSendProgress`,
+    // which does not fire reliably for a streamed body whose length Dio cannot
+    // infer. Progress that silently reports zero is worse than no progress:
+    // the user sees a stalled transfer and assumes it has hung.
+    var sent = 0;
+    final body = file.openRead().map((chunk) {
+      sent += chunk.length;
+      request.onProgress?.call(sent, total);
+      return chunk;
+    });
+
     final response = await _send<Response<dynamic>>(
       RequestClass.write,
       () => _client.put<dynamic>(
         _url(request.remotePath),
-        data: file.openRead(),
+        data: body,
         options: Options(
           headers: _headers(
             contentType: 'application/octet-stream',
-            // Refuse to clobber unless the user explicitly chose to overwrite.
-            extra: <String, dynamic>{if (!request.overwrite) 'If-None-Match': '*'},
+            extra: <String, dynamic>{
+              // Declared explicitly so the server can enforce its quota before
+              // receiving the whole body, and so Dio does not chunk-encode.
+              Headers.contentLengthHeader: '$total',
+              if (!request.overwrite) 'If-None-Match': '*',
+            },
           ),
           followRedirects: false,
         ),
-        onSendProgress: request.onProgress,
       ),
     );
 
@@ -530,77 +559,75 @@ class WebDavTransport implements PuterTransport {
     final target = File(request.localPath);
     target.parent.createSync(recursive: true);
 
-    // Write to a staging path, then promote. A partial download must never be
-    // mistaken for a complete file.
-    final staging = File('${request.localPath}.part');
-    final sink = staging.openWrite(
-      mode: request.resumeFromBytes > 0 ? FileMode.append : FileMode.write,
+    // Resume is derived from disk, not from the caller. The staging file *is*
+    // the transfer state: whatever it holds is what we already have. Trusting
+    // a caller-supplied offset would allow a mismatch, and writing at the wrong
+    // offset yields a file that looks plausible but is corrupt.
+    final staging = File(request.stagingPath);
+    final offset = staging.existsSync() ? staging.lengthSync() : 0;
+
+    final response = await _send<Response<dynamic>>(
+      RequestClass.read,
+      () => _client.get<ResponseBody>(
+        _url(request.remotePath),
+        options: Options(
+          headers: _headers(
+            extra: <String, dynamic>{
+              if (offset > 0) 'Range': 'bytes=$offset-',
+            },
+          ),
+          responseType: ResponseType.stream,
+          followRedirects: false,
+        ),
+      ),
     );
 
-    var written = request.resumeFromBytes;
-
-    try {
-      final response = await _send<Response<dynamic>>(
-        RequestClass.read,
-        () => _client.get<ResponseBody>(
-          _url(request.remotePath),
-          options: Options(
-            headers: _headers(
-              extra: <String, dynamic>{
-                if (request.resumeFromBytes > 0)
-                  'Range': 'bytes=${request.resumeFromBytes}-',
-              },
-            ),
-            responseType: ResponseType.stream,
-            followRedirects: false,
-          ),
-        ),
+    final status = response.statusCode ?? 0;
+    if (status != 200 && status != 206) {
+      if (staging.existsSync()) staging.deleteSync();
+      throw ErrorMapper.fromResponse(
+        status: status,
+        message: 'Download failed.',
+        path: request.remotePath,
       );
+    }
 
-      final status = response.statusCode ?? 0;
-      // 206 is the expected resume response. 200 means the server ignored the
-      // Range header and is resending from the start, which the append mode
-      // above would corrupt — so treat it as a fresh write.
-      if (status != 200 && status != 206) {
-        await sink.close();
-        if (staging.existsSync()) staging.deleteSync();
-        throw ErrorMapper.fromResponse(
-          status: status,
-          message: 'Download failed.',
-          path: request.remotePath,
-        );
-      }
-
-      if (status == 200 && request.resumeFromBytes > 0) {
-        // Restart cleanly rather than appending to a stale prefix.
-        await sink.close();
-        staging.deleteSync();
-        await download(DownloadRequest(
+    // 200 in answer to a Range request means the server ignored the header and
+    // is resending from the start. Appending would corrupt the file, so discard
+    // the partial data and retry cleanly — the recursion sees offset 0.
+    if (status == 200 && offset > 0) {
+      staging.deleteSync();
+      return download(
+        DownloadRequest(
           remotePath: request.remotePath,
           localPath: request.localPath,
           onProgress: request.onProgress,
           cancelSignal: request.cancelSignal,
-        ));
-        return;
-      }
+        ),
+      );
+    }
 
-      // Annotated explicitly: response.data is dynamic, and letting that
-      // propagate would make chunk.length a num rather than an int.
-      final ResponseBody? body = response.data as ResponseBody?;
-      if (body == null) {
-        await sink.close();
-        throw const PuterException(
-          PuterErrorKind.protocol,
-          'Download response had no body.',
-        );
-      }
+    // Annotated explicitly: response.data is dynamic, and letting that
+    // propagate would make chunk.length a num rather than an int.
+    final ResponseBody? body = response.data as ResponseBody?;
+    if (body == null) {
+      if (staging.existsSync()) staging.deleteSync();
+      throw const PuterException(
+        PuterErrorKind.protocol,
+        'Download response had no body.',
+      );
+    }
 
-      final declared = int.tryParse(
-            response.headers.value(Headers.contentLengthHeader) ?? '',
-          ) ??
-          0;
-      final expectedTotal = declared + request.resumeFromBytes;
+    final declared =
+        int.tryParse(response.headers.value(Headers.contentLengthHeader) ?? '') ??
+            0;
+    final expectedTotal = declared + offset;
+    final sink = staging.openWrite(
+      mode: offset > 0 ? FileMode.append : FileMode.write,
+    );
+    var written = offset;
 
+    try {
       await for (final chunk in body.stream) {
         sink.add(chunk);
         written += chunk.length;
@@ -608,14 +635,16 @@ class WebDavTransport implements PuterTransport {
       }
       await sink.flush();
       await sink.close();
-
-      // Promote only on success.
-      if (target.existsSync()) target.deleteSync();
-      staging.renameSync(request.localPath);
     } catch (_) {
+      // Leave the staging file in place so the next attempt can resume from it
+      // rather than starting the whole transfer again.
       await sink.close();
       rethrow;
     }
+
+    // Promote only once the whole body has landed.
+    if (target.existsSync()) target.deleteSync();
+    staging.renameSync(request.localPath);
   }
 
   // -------------------------------------------------------------------- usage
@@ -830,6 +859,7 @@ class WebDavTransport implements PuterTransport {
       // Properties often come back split across several propstat blocks with
       // different statuses; find the one that actually succeeded.
       XmlElement? successfulProp;
+      String? failingStatus;
       for (final propstat
           in response.findElements('propstat', namespace: 'DAV:')) {
         final status = propstat
@@ -841,20 +871,19 @@ class WebDavTransport implements PuterTransport {
               propstat.findElements('prop', namespace: 'DAV:').firstOrNull;
           break;
         }
+        failingStatus ??= status;
       }
 
       if (successfulProp == null) {
         // Every propstat failed for this entry. Record it rather than dropping
-        // it silently.
-        final status = response
-            .findElements('status', namespace: 'DAV:')
-            .map((element) => element.innerText)
-            .firstOrNull;
+        // it silently. Note the status lives *inside* the propstat, not as a
+        // direct child of response — reading only response-level children
+        // loses the reason the entry failed.
         failures.add(
           FailedItem(
             path: path,
             message: 'No successful propstat in the WebDAV response.',
-            statusCode: _statusCodeOf(status),
+            statusCode: _statusCodeOf(failingStatus),
           ),
         );
         continue;

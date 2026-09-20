@@ -129,9 +129,26 @@ flutter run
 ### Test
 
 ```bash
-flutter analyze
-flutter test
+flutter analyze                     # static analysis, strict rules
+flutter test                        # widget and unit tests
+
+# Verification that needs no Puter account, no network, and no test framework
+dart run tool/verify/verify_core.dart        # 21 checks — error taxonomy, scheduler, limits
+dart run tool/verify/verify_transport.dart   # 64 checks — WebDAV transport against a live fixture
 ```
+
+The two `verify_*` scripts exist because `flutter test` and `dart test` both fail in some
+environments — the former on the WebSocket upgrade to `flutter_tester`, the latter on the
+native-assets build hook. They depend on nothing but the Dart VM, so they always run.
+
+`verify_transport.dart` is the more interesting one. It starts
+[`test/support/webdav_fixture.dart`](test/support/webdav_fixture.dart) — a real HTTP server on
+loopback — and drives the transport against it over actual sockets. That catches things a mock
+never would: `207` responses carrying per-entry failures, `413` quota rejection, `429` handling,
+`412` overwrite refusal, `Range` resume, and a server that ignores `Range` and would otherwise
+corrupt a resumed download.
+
+It found four real defects the first time it ran.
 
 ---
 
@@ -151,6 +168,8 @@ lib/
 └── features/               Screens, added in Phases 2–4
 docs/                       Research, architecture, roadmap, security, ADRs
 tool/spike/                 Phase 0 feasibility diagnostic
+tool/verify/                Dependency-free verification (core + transport)
+test/support/               WebDAV fixture server for transport tests
 test/                       Unit, widget and contract tests
 ```
 

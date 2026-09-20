@@ -104,12 +104,12 @@ class RemoteNode {
 /// Puter's `readdir` returns a cursor when more pages exist; the cursor pins
 /// the sort order, so later pages must not change [ListRequest.sortBy] or
 /// [ListRequest.sortOrder].
-
 class RemoteNodePage {
   const RemoteNodePage({
     required this.items,
     this.cursor,
     this.total,
+    this.failures = const <NodeFailure>[],
   });
 
   final List<RemoteNode> items;
@@ -120,11 +120,40 @@ class RemoteNodePage {
   /// Total entry count, when the request asked for it.
   final int? total;
 
+  /// Entries the server refused to describe.
+  ///
+  /// WebDAV answers `PROPFIND` with `207 Multistatus`, which is **not** blanket
+  /// success: individual entries can fail while the response as a whole
+  /// succeeds. Dropping those entries silently would make files invisible with
+  /// no explanation, so they are carried up and surfaced in the UI.
+  final List<NodeFailure> failures;
+
   bool get hasMore => cursor != null;
 
+  /// True when the listing is incomplete — some entries could not be read.
+  bool get isPartial => failures.isNotEmpty;
+
   @override
-  String toString() =>
-      'RemoteNodePage(${items.length} items, hasMore=$hasMore)';
+  String toString() => 'RemoteNodePage(${items.length} items'
+      '${failures.isEmpty ? '' : ', ${failures.length} failed'}'
+      ', hasMore=$hasMore)';
+}
+
+/// An entry the server returned in a multistatus response but refused to
+/// describe, so it could not be turned into a [RemoteNode].
+class NodeFailure {
+  const NodeFailure({
+    required this.path,
+    required this.message,
+    this.statusCode,
+  });
+
+  final String path;
+  final String message;
+  final int? statusCode;
+
+  @override
+  String toString() => '$path: $message';
 }
 
 /// How a directory listing should be shaped.
@@ -133,7 +162,6 @@ enum NodeSortField { name, modified, type, size }
 enum SortOrder { ascending, descending }
 
 /// Parameters for a directory listing.
-
 class ListRequest {
   const ListRequest({
     required this.path,

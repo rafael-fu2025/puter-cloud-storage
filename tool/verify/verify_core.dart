@@ -74,7 +74,7 @@ Future<void> main() async {
   check('authInvalid is never retryable and needs the user', () {
     // Retrying a failed sign-in can trip WebDAV's 15-minute lockout, which
     // returns 429 even for a correct token. See docs/security.md §4.
-    final e = PuterException(PuterErrorKind.authInvalid, 'x');
+    const e = PuterException(PuterErrorKind.authInvalid, 'x');
     eq(e.isRetryable, false);
     eq(e.requiresUserAction, true);
   });
