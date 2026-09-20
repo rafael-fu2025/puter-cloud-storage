@@ -37,7 +37,7 @@ class AppConfig {
   const AppConfig({
     this.transportMode = TransportMode.auto,
     this.planTier = PlanTier.free,
-    this.maxConcurrentRequests = 6,
+    this.maxConcurrentRequests = 5,
     this.maxConcurrentTransfers = 4,
     this.chunkSizeBytes = 8 * 1024 * 1024,
     this.listingPageSize = 200,
@@ -56,10 +56,12 @@ class AppConfig {
 
   /// Global ceiling across every request class.
   ///
-  /// Defaults to 6: comfortably under the documented free-tier filesystem
-  /// concurrency (5 reads / 6 writes) and well under WebDAV's 10, while still
-  /// saturating a typical mobile link. Raised only when Phase 0 measurement
-  /// justifies it.
+  /// Defaults to **5**, because that is the binding constraint: the free tier
+  /// allows 5 concurrent reads (6 writes, 10 reads/writes paid), and WebDAV
+  /// allows 10 for the whole network. A higher global cap would let the
+  /// scheduler admit more reads than the read bucket permits.
+  ///
+  /// Raised only when Phase 0 measurement justifies it.
   final int maxConcurrentRequests;
 
   /// Parallel file transfers. Must not exceed [maxConcurrentRequests].

@@ -219,7 +219,7 @@ class RateLimiter {
 ```
 
 - **Token-bucket per operation class** (`stat`, `readdir`, `read`, `write`, `mutation`, `search`, `signedUrl`), seeded conservatively at the **free-tier** numbers and raised when a paid plan is detected
-- A **global concurrency cap** (default 6, safely under every documented ceiling) enforced across all classes
+- A **global concurrency cap** (default 5) enforced across all classes. Five is the binding constraint: the free tier allows 5 concurrent reads, so a higher global cap would let the scheduler admit more reads than the read bucket permits
 - **Priority queue**: user-initiated actions outrank background work (index refresh, thumbnail warming, auto-backup)
 - **Cooperative cancellation** — a queued request whose view has been disposed is dropped rather than sent
 - On `429`: honour `Retry-After` when present, otherwise exponential backoff with full jitter, capped at 60s. Distinguish the 60s rolling window from the 1h sustained-budget window by tracking which class tripped
