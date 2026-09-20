@@ -66,3 +66,6 @@ GoogleService-Info.plist
 # Local Flutter tooling state — machine-specific, not project content.
 .flutter
 .flutter_tool_state
+
+# Agent tooling state. Kept on disk; never published.
+.workbuddy-ai/
