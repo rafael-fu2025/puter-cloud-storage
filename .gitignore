@@ -44,6 +44,11 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Gradle output. Flutter's android/.gitignore does not cover this, and a
+# problems-report.html slipped into a commit because of it.
+/android/build/
+/build/
+
 # ---------------------------------------------------------------------------
 # Credentials. The Puter auth token grants full access to the account, so
 # nothing that could carry it may ever be committed. See docs/security.md.
