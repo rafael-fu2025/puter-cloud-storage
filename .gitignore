@@ -72,5 +72,8 @@ GoogleService-Info.plist
 .flutter
 .flutter_tool_state
 
-# Agent tooling state. Kept on disk; never published.
+# Agent tooling state. Kept on disk; never published. Both directories hold
+# session ids, hook state and transcripts — machine-specific, and nothing to do
+# with the project.
 .workbuddy-ai/
+.mimosa/

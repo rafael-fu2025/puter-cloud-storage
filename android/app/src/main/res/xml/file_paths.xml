@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  What FileProvider is allowed to hand out.
+
+  Narrow on purpose. MainActivity only ever shares a file the user just
+  downloaded, and those live in the app-specific external Downloads folder, so
+  nothing else needs to be reachable. Enumerating fewer roots means a mistake in
+  the sharing path cannot expose the token database or the SQLite index.
+-->
+<paths>
+    <!-- Downloads. Mirrors PlatformDeviceFiles.downloadDirectory(), which
+         resolves to <external-files>/Downloads on Android. -->
+    <external-files-path name="downloads" path="Downloads/" />
+    <!-- The whole app-specific external root, so a download that landed at the
+         top level (external storage unavailable at the time) is still openable. -->
+    <external-files-path name="external_files" path="." />
+    <!-- Picked uploads are copied here. Sharing one is a legitimate way to hand
+         a file to another app before or after uploading it. -->
+    <cache-path name="cache" path="." />
+</paths>

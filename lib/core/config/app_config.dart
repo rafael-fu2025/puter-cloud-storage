@@ -10,14 +10,23 @@
 library;
 
 /// Which wire protocol is used to reach Puter.
+///
+/// Only [webdav] is implemented. The other modes are declared because ADR 0002
+/// designed them and the settings screen records the intention, but selecting
+/// one changes nothing at runtime — [WebViewTransport] cannot be built against
+/// the current toolchain (docs/build-assessment.md §4.4) and `RestTransport` was
+/// never enabled. See `PuterTransport` for what actually sits behind the
+/// interface today.
 enum TransportMode {
-  /// WebDAV, pure Dart. The primary path — see ADR 0002.
+  /// WebDAV, pure Dart. The primary path — see ADR 0002. The only implemented
+  /// transport.
   webdav,
 
   /// Puter.js inside a WebView. Fallback for what WebDAV cannot express.
+  /// Declared, not built.
   webview,
 
-  /// Direct driver calls. Undocumented; disabled unless explicitly enabled.
+  /// Direct driver calls. Undocumented; never enabled.
   rest,
 
   /// Probe at startup and pick the best available. Default.

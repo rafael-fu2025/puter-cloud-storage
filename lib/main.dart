@@ -1,11 +1,10 @@
 /// Puter Cloud Storage — Android client.
 ///
-/// Entry point. Wires the composition root and hands off to [PuterCloudApp].
+/// Entry point. Builds the object graph once and hands off to [PuterCloudApp].
 ///
-/// Note on scope: this repository currently contains the **foundation** —
-/// transport layer, rate limiting, token vault, domain model and error
-/// taxonomy — which is what Phase 1 of `docs/roadmap.md` calls for. Feature
-/// screens arrive in Phases 2 to 4.
+/// Everything that touches the device — the database, the platform channel — is
+/// constructed here rather than looked up from a global, so the composition is
+/// readable in one place and each piece can be substituted in a test.
 library;
 
 import 'package:flutter/material.dart';
@@ -16,13 +15,21 @@ import 'app/providers.dart';
 import 'core/config/app_config.dart';
 import 'core/network/request_scheduler.dart';
 import 'core/security/token_vault.dart';
+import 'data/database/app_database.dart';
+import 'data/database/node_cache.dart';
+import 'data/platform/device_files.dart';
+import 'data/repositories/settings_repository.dart';
+import 'data/transfer/transfer_store.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // Configuration is created once here rather than being read from globals
-  // scattered through the codebase.
   const config = AppConfig();
+
+  // One database handle for the whole app. Opening is lazy — `LazyDatabase`
+  // defers the file lookup to the first query — so this costs nothing at
+  // startup and never blocks the first frame.
+  final database = AppDatabase.open();
 
   runApp(
     ProviderScope(
@@ -32,6 +39,12 @@ Future<void> main() async {
         requestSchedulerProvider.overrideWithValue(
           RequestScheduler(config: config),
         ),
+        databaseProvider.overrideWithValue(database),
+        nodeCacheProvider.overrideWithValue(DriftNodeCache(database)),
+        transferStoreProvider.overrideWithValue(DriftTransferStore(database)),
+        preferencesStoreProvider
+            .overrideWithValue(DriftPreferencesStore(database)),
+        deviceFilesProvider.overrideWithValue(PlatformDeviceFiles()),
       ],
       child: const PuterCloudApp(),
     ),

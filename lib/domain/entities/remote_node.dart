@@ -205,6 +205,12 @@ class StorageUsage {
   double get usedFraction =>
       capacityBytes <= 0 ? 0 : (usedBytes / capacityBytes).clamp(0.0, 1.0);
 
+  /// Used space as a percentage in `[0, 100]`, ready for display.
+  ///
+  /// A convenience over [usedFraction] so the storage meter does not repeat
+  /// the `* 100` in three places.
+  double get percentage => usedFraction * 100;
+
   bool isNearLimit(double threshold) => usedFraction >= threshold;
 
   /// Whether a file of [bytes] fits without exceeding the quota.
@@ -303,22 +309,42 @@ class TransferTask {
       state == TransferState.cancelled ||
       state == TransferState.blocked;
 
+  /// Whether the task is finished with, either way. Distinct from [isTerminal]:
+  /// a failed task is still waiting on the user to retry it, so it stays in the
+  /// queue, but it is no longer competing for transfer capacity.
+  bool get isFinished => isTerminal || state == TransferState.failed;
+
+  /// Whether bytes are moving right now.
+  bool get isActive => state == TransferState.running;
+
+  /// Whether the user can still do something to move this task forward.
+  bool get canRetry =>
+      state == TransferState.failed || state == TransferState.cancelled;
+
   TransferTask copyWith({
+    int? totalBytes,
     int? bytesDone,
     TransferState? state,
     int? attempts,
     String? lastError,
+
+    /// Clear [lastError] explicitly.
+    ///
+    /// Needed because `lastError: null` cannot distinguish "leave it alone"
+    /// from "remove it" on a nullable field — and a task that has just
+    /// succeeded must not keep displaying the error from its last attempt.
+    bool clearError = false,
   }) {
     return TransferTask(
       id: id,
       direction: direction,
       remotePath: remotePath,
       localPath: localPath,
-      totalBytes: totalBytes,
+      totalBytes: totalBytes ?? this.totalBytes,
       bytesDone: bytesDone ?? this.bytesDone,
       state: state ?? this.state,
       attempts: attempts ?? this.attempts,
-      lastError: lastError ?? this.lastError,
+      lastError: clearError ? null : (lastError ?? this.lastError),
       createdAt: createdAt,
     );
   }

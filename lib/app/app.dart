@@ -1,273 +1,174 @@
 /// Application shell.
 ///
-/// At this stage the app renders the onboarding gate, which is the only screen
-/// Phase 1 requires. Feature screens land in Phases 2 to 4 — see
-/// `docs/roadmap.md`.
+/// The root decides which of three things the user sees: onboarding, a
+/// connecting state, or the app itself. That decision lives in one place so
+/// there is no path into the signed-in UI without a live transport behind it —
+/// which is what makes "the browser is always either working or explaining why
+/// it is not" true rather than aspirational.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../core/error/error_presenter.dart';
+import 'home_shell.dart';
 import 'providers.dart';
+import 'session.dart';
+import 'welcome_screen.dart';
 
 /// Root widget.
-class PuterCloudApp extends ConsumerWidget {
+class PuterCloudApp extends StatelessWidget {
   const PuterCloudApp({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Puter Cloud Storage',
       debugShowCheckedModeBanner: false,
-      theme: _lightTheme,
-      darkTheme: _darkTheme,
+      theme: lightTheme,
+      darkTheme: darkTheme,
       themeMode: ThemeMode.system,
-      home: const OnboardingGate(),
+      home: const SessionGate(),
     );
   }
 
-  static final ThemeData _lightTheme = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: const Color(0xFF3B6EF6),
-    ),
-  );
+  /// Puter's own blue, so the app reads as a client of the platform rather than
+  /// a separate product that happens to use it.
+  static const Color _seed = Color(0xFF3B6EF6);
 
-  static final ThemeData _darkTheme = ThemeData(
-    useMaterial3: true,
-    colorScheme: ColorScheme.fromSeed(
-      seedColor: const Color(0xFF3B6EF6),
-      brightness: Brightness.dark,
-    ),
-  );
+  static final ThemeData lightTheme = _buildTheme(Brightness.light);
+  static final ThemeData darkTheme = _buildTheme(Brightness.dark);
+
+  static ThemeData _buildTheme(Brightness brightness) {
+    final scheme = ColorScheme.fromSeed(
+      seedColor: _seed,
+      brightness: brightness,
+    );
+    return ThemeData(
+      useMaterial3: true,
+      colorScheme: scheme,
+      // A flat visual language suits a file list, where the content is the
+      // decoration and elevation on every row reads as noise.
+      appBarTheme: AppBarTheme(
+        backgroundColor: scheme.surface,
+        surfaceTintColor: Colors.transparent,
+        scrolledUnderElevation: 1,
+      ),
+      cardTheme: const CardThemeData(
+        clipBehavior: Clip.antiAlias,
+        margin: EdgeInsets.zero,
+      ),
+      progressIndicatorTheme: const ProgressIndicatorThemeData(
+        linearMinHeight: 4,
+      ),
+    );
+  }
 }
 
-/// Routes between onboarding and the main shell based on whether a token is
-/// present.
-class OnboardingGate extends ConsumerWidget {
-  const OnboardingGate({super.key});
+/// Routes between onboarding and the app based on the session state.
+class SessionGate extends ConsumerWidget {
+  const SessionGate({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final authenticated = ref.watch(isAuthenticatedProvider);
+    final session = ref.watch(sessionProvider);
 
-    return authenticated.when(
-      loading: () => const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      ),
-      error: (error, _) => Scaffold(
-        body: Center(
-          child: Padding(
-            padding: const EdgeInsets.all(24),
-            child: Text('Could not read stored credentials: $error'),
-          ),
+    return session.when(
+      loading: () => const _SessionLoading(),
+      error: (Object error, StackTrace _) => _SessionFailure(error: error),
+      data: (SessionState value) => switch (value.status) {
+        SessionStatus.signedOut => const WelcomeScreen(),
+        SessionStatus.failed =>
+          _SessionFailure(error: value.error ?? 'Unknown failure'),
+        SessionStatus.connecting => const _SessionLoading(),
+        SessionStatus.ready => const HomeShell(),
+      },
+    );
+  }
+}
+
+/// Shown while the stored credential is being turned into a session.
+class _SessionLoading extends StatelessWidget {
+  const _SessionLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            const CircularProgressIndicator(),
+            const SizedBox(height: 20),
+            Text(
+              'Connecting to Puter…',
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.colorScheme.onSurfaceVariant,
+              ),
+            ),
+          ],
         ),
       ),
-      data: (hasToken) =>
-          hasToken ? const _FoundationStatusScreen() : const _WelcomeScreen(),
     );
   }
 }
 
-/// First-run screen.
+/// The last attempt failed. Says what happened and offers the one action that
+/// can help.
 ///
-/// The disclosure text here is a security requirement, not copy polish: the
-/// user is being asked to hand over an account-wide root credential and is
-/// entitled to know that before pasting it. See `docs/security.md` §5.
-class _WelcomeScreen extends StatelessWidget {
-  const _WelcomeScreen();
+/// Retry appears only when the error kind says a retry could plausibly succeed.
+/// Offering it for a `429` lockout would walk the user straight back into the
+/// failed-sign-in limit that produced it — the one mistake this app cannot
+/// afford to make, because it locks the account out of its own storage.
+class _SessionFailure extends ConsumerWidget {
+  const _SessionFailure({required this.error});
 
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Puter Cloud Storage')),
-      body: ListView(
-        padding: const EdgeInsets.all(24),
-        children: <Widget>[
-          Icon(
-            Icons.cloud_outlined,
-            size: 72,
-            color: theme.colorScheme.primary,
-          ),
-          const SizedBox(height: 24),
-          Text(
-            'Connect your Puter account',
-            style: theme.textTheme.headlineSmall,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'This app reaches your Puter storage directly. It signs in with an '
-            'auth token you create yourself, so there is no password to share '
-            'and no OAuth popup.',
-            style: theme.textTheme.bodyMedium,
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 24),
-          Card(
-            color: theme.colorScheme.errorContainer,
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Icon(
-                        Icons.warning_amber_rounded,
-                        color: theme.colorScheme.onErrorContainer,
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Before you continue',
-                        style: theme.textTheme.titleMedium?.copyWith(
-                          color: theme.colorScheme.onErrorContainer,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Your Puter auth token grants full access to your Puter '
-                    'account. Anyone who obtains it can read, modify, and '
-                    'delete your files.\n\n'
-                    'Store it as you would a password. You can revoke it at '
-                    'any time from your Puter dashboard.',
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      color: theme.colorScheme.onErrorContainer,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
-          Text('Create a token', style: theme.textTheme.titleMedium),
-          const SizedBox(height: 8),
-          const _Steps(
-            steps: <String>[
-              'Sign in at puter.com/dashboard#account',
-              'Find the API token section',
-              'Click Create token — it is copied to your clipboard',
-              'Return here and paste it on the next screen',
-            ],
-          ),
-          const SizedBox(height: 32),
-          FilledButton(
-            onPressed: () {
-              // Phase 2 wires this to the token entry screen and a single
-              // validation attempt. Validation must never retry automatically:
-              // ten failed WebDAV sign-ins lock the account for 15 minutes.
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Token entry arrives in Phase 2.'),
-                ),
-              );
-            },
-            child: const Text('Enter token'),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            'Powered by Puter',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodySmall,
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Steps extends StatelessWidget {
-  const _Steps({required this.steps});
-
-  final List<String> steps;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        for (var i = 0; i < steps.length; i++)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Text(
-                  '${i + 1}.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(steps[i], style: theme.textTheme.bodyMedium),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-/// Placeholder shown when a token exists.
-///
-/// Phase 2 replaces this with the file browser.
-class _FoundationStatusScreen extends ConsumerWidget {
-  const _FoundationStatusScreen();
+  final Object error;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final config = ref.watch(appConfigProvider);
-    final scheduler = ref.watch(requestSchedulerProvider);
+    final theme = Theme.of(context);
+    final presentation = ErrorPresenter.describe(error);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Foundation ready')),
-      body: ListView(
-        padding: const EdgeInsets.all(16),
-        children: <Widget>[
-          const Card(
-            child: ListTile(
-              leading: Icon(Icons.check_circle_outline),
-              title: Text('Phase 1 foundation is in place'),
-              subtitle: Text(
-                'Transport, scheduler, token vault, domain model and error '
-                'taxonomy are implemented. Feature screens arrive in Phase 2.',
+      appBar: AppBar(title: const Text('Puter Cloud Storage')),
+      body: Center(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(presentation.icon, size: 64, color: theme.colorScheme.error),
+              const SizedBox(height: 20),
+              Text(
+                presentation.title,
+                style: theme.textTheme.titleLarge,
+                textAlign: TextAlign.center,
               ),
-            ),
+              const SizedBox(height: 10),
+              Text(
+                presentation.message,
+                style: theme.textTheme.bodyMedium,
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 28),
+              if (presentation.canRetry)
+                FilledButton.icon(
+                  onPressed: () => ref.invalidate(sessionProvider),
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Try again'),
+                ),
+              const SizedBox(height: 8),
+              // Always available: a fresh token fixes a revoked one, and is the
+              // only way forward when the stored credential is the problem.
+              TextButton(
+                onPressed: () => ref.read(sessionProvider.notifier).signOut(),
+                child: const Text('Use a different token'),
+              ),
+            ],
           ),
-          const SizedBox(height: 8),
-          Card(
-            child: Column(
-              children: <Widget>[
-                ListTile(
-                  title: const Text('Transport mode'),
-                  trailing: Text(config.transportMode.name),
-                ),
-                ListTile(
-                  title: const Text('Plan tier'),
-                  trailing: Text(config.planTier.name),
-                ),
-                ListTile(
-                  title: const Text('Max concurrent requests'),
-                  trailing: Text('${config.maxConcurrentRequests}'),
-                ),
-                ListTile(
-                  title: const Text('Queued now'),
-                  trailing: Text('${scheduler.queuedCount}'),
-                ),
-                ListTile(
-                  title: const Text('In flight now'),
-                  trailing: Text('${scheduler.totalInFlight}'),
-                ),
-              ],
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

@@ -64,6 +64,13 @@ class WebDavTransport implements PuterTransport {
   @override
   String get name => 'webdav';
 
+  /// The base URL that answered the probe, or `null` before authentication.
+  ///
+  /// Exposed for the diagnostics screen: when two of the three candidate hosts
+  /// exist, which one is actually serving the account is the first thing worth
+  /// knowing about a connection problem.
+  String? get endpoint => _baseUrl;
+
   @override
   TransportCapabilities get capabilities => const TransportCapabilities(
         canList: true,
@@ -490,6 +497,7 @@ class WebDavTransport implements PuterTransport {
     // Streamed body: never load the file into memory. This is the whole reason
     // WebDAV was chosen over the WebView bridge.
     final total = file.lengthSync();
+    final cancelled = _watchCancellation(request.cancelSignal);
 
     // Count bytes as they leave rather than relying on Dio's `onSendProgress`,
     // which does not fire reliably for a streamed body whose length Dio cannot
@@ -497,28 +505,39 @@ class WebDavTransport implements PuterTransport {
     // the user sees a stalled transfer and assumes it has hung.
     var sent = 0;
     final body = file.openRead().map((chunk) {
+      // Checked per chunk, which is as promptly as a chunked PUT can be
+      // interrupted: the connection has to be abandoned at a chunk boundary or
+      // the server sees a truncated body with no way to tell it from a network
+      // failure.
+      if (cancelled()) throw const TransferCancelled();
       sent += chunk.length;
       request.onProgress?.call(sent, total);
       return chunk;
     });
 
-    final response = await _send<Response<dynamic>>(
-      RequestClass.write,
-      () => _client.put<dynamic>(
-        _url(request.remotePath),
-        data: body,
-        options: Options(
-          headers: _headers(
-            contentType: 'application/octet-stream',
-            extra: <String, dynamic>{
-              // Declared explicitly so the server can enforce its quota before
-              // receiving the whole body, and so Dio does not chunk-encode.
-              Headers.contentLengthHeader: '$total',
-              if (!request.overwrite) 'If-None-Match': '*',
-            },
+    final response = await _asCancellation(
+      () => _send<Response<dynamic>>(
+        RequestClass.write,
+        () => _client.put<dynamic>(
+          _url(request.remotePath),
+          data: body,
+          options: Options(
+            headers: _headers(
+              contentType: 'application/octet-stream',
+              extra: <String, dynamic>{
+                // Declared explicitly so the server can enforce its quota before
+                // receiving the whole body, and so Dio does not chunk-encode.
+                Headers.contentLengthHeader: '$total',
+                if (!request.overwrite) 'If-None-Match': '*',
+              },
+            ),
+            followRedirects: false,
           ),
-          followRedirects: false,
         ),
+        // A file transfer is not an interactive request. The default request
+        // timeout would abort every upload that takes longer than 30 seconds,
+        // which is most of them.
+        timeout: _config.transferTimeout,
       ),
     );
 
@@ -565,6 +584,7 @@ class WebDavTransport implements PuterTransport {
     // offset yields a file that looks plausible but is corrupt.
     final staging = File(request.stagingPath);
     final offset = staging.existsSync() ? staging.lengthSync() : 0;
+    final cancelled = _watchCancellation(request.cancelSignal);
 
     final response = await _send<Response<dynamic>>(
       RequestClass.read,
@@ -580,6 +600,7 @@ class WebDavTransport implements PuterTransport {
           followRedirects: false,
         ),
       ),
+      timeout: _config.transferTimeout,
     );
 
     final status = response.statusCode ?? 0;
@@ -629,6 +650,10 @@ class WebDavTransport implements PuterTransport {
 
     try {
       await for (final chunk in body.stream) {
+        // Cancellation is checked here rather than mid-chunk: whatever has
+        // already been written stays in the staging file, which is what makes
+        // the next attempt resume instead of restart.
+        if (cancelled()) throw const TransferCancelled();
         sink.add(chunk);
         written += chunk.length;
         request.onProgress?.call(written, expectedTotal);
@@ -726,17 +751,57 @@ class WebDavTransport implements PuterTransport {
   }
 
   /// Route a request through the scheduler so it counts against the budget.
+  ///
+  /// [timeout] bounds the whole call — queue wait *and* execution — so file
+  /// transfers pass [AppConfig.transferTimeout] rather than the interactive
+  /// default. Using the request timeout for an upload would abort it after 30
+  /// seconds regardless of how well it was progressing.
   Future<T> _send<T>(
     RequestClass klass,
     Future<T> Function() operation, {
     RequestPriority priority = RequestPriority.interactive,
+    Duration? timeout,
   }) {
     return _scheduler.schedule<T>(
       klass,
       operation,
       priority: priority,
-      timeout: _config.requestTimeout,
+      timeout: timeout ?? _config.requestTimeout,
     );
+  }
+
+  /// Build a pollable view of a cooperative cancel signal.
+  ///
+  /// The interface takes a `Future` because that is what a caller can complete
+  /// from anywhere, but the streaming loops above need to ask a question
+  /// synchronously at each chunk boundary. Subscribing once and setting a flag
+  /// is the entire mechanism.
+  ///
+  /// A signal that completes *after* the transfer has finished is harmless: the
+  /// engine drops the task, and nothing reads the flag again.
+  static bool Function() _watchCancellation(Future<void>? signal) {
+    if (signal == null) return () => false;
+    var cancelled = false;
+    unawaited(signal.then((_) => cancelled = true, onError: (_) {}));
+    return () => cancelled;
+  }
+
+  /// Run [operation], normalising a cancellation back to [TransferCancelled].
+  ///
+  /// Dio wraps an error thrown from a request body stream in its own
+  /// [DioException], so a bare `throw TransferCancelled()` inside the upload
+  /// stream would otherwise reach the caller as an unclassified protocol
+  /// failure and be reported to the user as one.
+  Future<T> _asCancellation<T>(Future<T> Function() operation) async {
+    try {
+      return await operation();
+    } catch (error) {
+      if (error is TransferCancelled) rethrow;
+      if (error is DioException && error.error is TransferCancelled) {
+        throw const TransferCancelled();
+      }
+      rethrow;
+    }
   }
 
   Map<String, dynamic> _headers({

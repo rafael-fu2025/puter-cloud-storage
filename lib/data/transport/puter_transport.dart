@@ -1,17 +1,21 @@
 /// The transport boundary — the one place in the app that knows Puter exists
 /// as a protocol.
 ///
-/// Three implementations sit behind this interface (ADR 0002):
+/// ADR 0002 designed three implementations behind this interface:
 ///
-/// * [WebDavTransport] — pure Dart, the primary path.
+/// * [WebDavTransport] — pure Dart, the primary path. **The only one that
+///   exists.** It covers listing, metadata, mutation, streaming upload and
+///   download, and quota.
 /// * `WebViewTransport` — Puter.js in a WebView, for what WebDAV cannot express.
-/// * `RestTransport` — undocumented driver calls, disabled by default.
+///   Not built: `flutter_inappwebview` does not compile against the Gradle 9.1
+///   toolchain Flutter 3.44 generates (docs/build-assessment.md §4.4), so the
+///   fallback is a design intention rather than an option. [TransportCapabilities]
+///   is what keeps the UI honest about the gap in the meantime.
+/// * `RestTransport` — undocumented driver calls, never enabled.
 ///
-/// A single contract test suite runs against every implementation, so a
-/// fallback cannot silently diverge from the primary. That suite is what makes
-/// a three-transport design safe rather than aspirational.
-///
-/// Nothing above the data layer may import a concrete transport.
+/// The interface is nonetheless the right shape: it is what lets the coverage
+/// question be answered by a contract suite rather than by hope, and what stops
+/// a concrete transport from being imported above the data layer.
 library;
 
 import 'dart:async';
@@ -31,6 +35,21 @@ class TokenCredential {
   /// credential is the most common way one leaks.
   @override
   String toString() => 'TokenCredential(***)';
+}
+
+/// Raised when a transfer stops because the caller completed its
+/// `cancelSignal`.
+///
+/// Deliberately **not** a [PuterException]. Cancellation is not a failure: the
+/// transfer screen must not offer Retry for a stop the user asked for, and an
+/// attempt counter that includes cancellations would report a healthy transfer
+/// as flaky. Keeping it a separate type means neither mistake is possible by
+/// accident.
+class TransferCancelled implements Exception {
+  const TransferCancelled();
+
+  @override
+  String toString() => 'Transfer cancelled.';
 }
 
 /// Which capabilities a transport can actually perform.

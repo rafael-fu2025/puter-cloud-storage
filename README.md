@@ -10,11 +10,31 @@ create yourself, so there is no OAuth popup and no password to share.
 
 ## Status
 
-**Phase 1 — foundation.** The transport layer, request scheduler, token vault, domain model and
-error taxonomy are implemented and tested. The app compiles and packages for release; feature
-screens arrive in Phases 2–4.
+**Phases 1–4 are implemented.** The app is a working file manager: it authenticates with a Puter
+auth token, browses a real account, searches, and moves files in both directions through a
+persistent per-file transfer queue.
 
-See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
+| Area | State |
+|---|---|
+| Onboarding | Welcome disclosure, token entry, one validation attempt, honest error states |
+| Browse | Folder listing, breadcrumbs, list and grid, four sort fields, pull-to-refresh, storage meter |
+| Folders | Create, rename, move, copy, delete, details — each followed by a reconciling refresh |
+| Uploads | Multi-select from the device, streamed from disk, quota pre-check, resumable queue |
+| Downloads | Streamed to a staging file, `Range` resume, open-with, save-to-device |
+| Transfers | Per-file state, pause/resume/cancel/retry, queue that survives the process being killed |
+| Search | As-you-type over the local index, scoped to a folder or the whole account |
+| Settings | View mode, sort defaults, cache management, sign-out, diagnostics |
+| Diagnostics | Transport, endpoint, capabilities, per-class rate-limit budget, quota |
+
+Two limits are stated in the UI rather than hidden, because pretending otherwise would be a lie:
+
+- **Search covers only what has been indexed.** Puter offers no server-side filesystem search, so
+  the app searches its own copy — and the search screen says how many entries that is.
+- **Pausing an upload restarts it.** WebDAV `PUT` with `Content-Range` is unverified, so
+  `canResumeUpload` is `false` and the transfers screen says so instead of implying otherwise.
+
+See [`docs/roadmap.md`](docs/roadmap.md) for the plan. Phases 5–6 — photo auto-backup, preview,
+sharing, offline mutation replay, multi-account — remain.
 
 ---
 
@@ -111,10 +131,13 @@ it from the same dashboard page.
 
 ### Run the Phase 0 spike first
 
-Before writing any feature code, confirm the assumptions the architecture rests on:
+Before writing any feature code, confirm the assumptions the architecture rests on. Read the token
+from a file rather than pasting it into the command — a literal secret on a command line ends up in
+your shell history:
 
 ```bash
-PUTER_AUTH_TOKEN=<your-token> dart run tool/spike/phase0_spike.dart
+# Put your token in ~/.puter-token (chmod 600), then:
+PUTER_AUTH_TOKEN="$(cat ~/.puter-token)" dart run tool/spike/phase0_spike.dart
 ```
 
 It answers the eight questions in [`docs/roadmap.md`](docs/roadmap.md), including the storage quota
@@ -149,11 +172,14 @@ Sizes, the toolchain inventory, and the constraints worth knowing before you bui
 
 ```bash
 flutter analyze                     # static analysis, strict rules
-flutter test                        # widget and unit tests
+flutter test                        # 103 unit and widget tests
 
 # Verification that needs no Puter account, no network, and no test framework
 dart run tool/verify/verify_core.dart        # 21 checks — error taxonomy, scheduler, limits
 dart run tool/verify/verify_transport.dart   # 64 checks — WebDAV transport against a live fixture
+
+# On a connected device: the Android-only pieces, which the host cannot test
+flutter test integration_test -d <device>    # 8 checks — Keystore, SQLite, platform channel
 ```
 
 The two `verify_*` scripts exist because `flutter test` and `dart test` both fail in some
@@ -169,28 +195,57 @@ corrupt a resumed download.
 
 It found four real defects the first time it ran.
 
+`integration_test/` covers what a host test cannot: the Keystore-backed vault, the bundled SQLite
+native library, `path_provider`, and the `MethodChannel` in `MainActivity.kt`. Those fail at
+runtime rather than at compile time, so they need a real device — and one of them,
+`100%_report.pdf`, exists specifically to prove the `LIKE` escaping in the index works.
+
+The transfer suite is where the interesting assertions live: a task persisted as `running` comes
+back `queued` after a restart, a `413` blocks without spending a retry, cancelling is not recorded
+as failing, and concurrency never exceeds the cap.
+
 ---
 
 ## Project layout
 
 ```
 lib/
-├── app/                    Composition root, shell, providers
+├── app/                    Composition root, session, shell, onboarding gate
 ├── core/
 │   ├── config/             AppConfig, endpoints, plan tiers
-│   ├── error/              PuterException, error taxonomy, ErrorMapper
+│   ├── error/              PuterException, error taxonomy, ErrorMapper, user-facing copy
+│   ├── format/             Byte and date formatting, file-type icons
 │   ├── network/            RequestScheduler, token buckets, backoff
 │   └── security/           TokenVault, credential redaction
 ├── data/
+│   ├── database/           Drift schema, the local index, NodeCache
+│   ├── platform/           The MethodChannel bridge for pick / export / open
+│   ├── repositories/       FileRepository, SettingsRepository
+│   ├── transfer/           TransferEngine, persistent queue store
 │   └── transport/          PuterTransport + WebDAV implementation
-├── domain/entities/        RemoteNode, StorageUsage, TransferTask
-└── features/               Screens, added in Phases 2–4
+├── domain/entities/        RemoteNode, StorageUsage, TransferTask, RemotePath
+└── features/
+    ├── auth/               Token entry
+    ├── browser/            File browser, sorting, file operations
+    ├── search/             Local-index search
+    ├── settings/           Settings and diagnostics
+    └── transfers/          Transfer queue screen
 docs/                       Research, architecture, roadmap, security, ADRs
 tool/spike/                 Phase 0 feasibility diagnostic
 tool/verify/                Dependency-free verification (core + transport)
-test/support/               WebDAV fixture server for transport tests
-test/                       Unit, widget and contract tests
+test/support/               WebDAV fixture server, scriptable fake transport
+integration_test/           On-device tests for the Android-only pieces
+test/                       Unit and widget tests
 ```
+
+### Android-only code
+
+Three operations live in `MainActivity.kt` rather than in a plugin: picking files to upload,
+exporting a download to a location the user chooses, and opening a downloaded file. All three go
+through Android's **Storage Access Framework**, which grants access to exactly the URI the user
+picked — so the app declares **no storage permission at all**, and `permission_handler` is not a
+dependency. `FileProvider` is what makes "open this file" work, because a `file://` URI has thrown
+`FileUriExposedException` since Android 7.
 
 ---
 
