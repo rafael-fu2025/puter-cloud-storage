@@ -1,0 +1,302 @@
+/// Domain entities.
+///
+/// Pure Dart. No Flutter, no HTTP, no Puter protocol types. The domain layer
+/// describes *what* the app manipulates; the transport layer describes *how*
+/// those things travel.
+///
+/// Staying Flutter-free keeps this layer testable with `dart test` and usable
+/// from a future CLI or desktop shell without dragging in the framework.
+library;
+
+/// A file or directory in the remote Puter filesystem.
+class RemoteNode {
+  const RemoteNode({
+    required this.path,
+    required this.name,
+    required this.isDirectory,
+    this.sizeBytes = 0,
+    this.modifiedAt,
+    this.mimeType,
+    this.etag,
+    this.isShared,
+    this.indexedAt,
+  });
+
+  /// Absolute path, rooted at the user's home rather than the app sandbox, so
+  /// the same folders appear in Puter's own desktop UI.
+  final String path;
+
+  final String name;
+  final bool isDirectory;
+  final int sizeBytes;
+  final DateTime? modifiedAt;
+  final String? mimeType;
+
+  /// Server-side version marker, used to skip no-op index writes.
+  final String? etag;
+
+  /// `true` when shared by the user, `false` when not, `null` when the item
+  /// belongs to someone else. Puter reports exactly this tri-state.
+  final bool? isShared;
+
+  /// When this row was last confirmed against the server.
+  final DateTime? indexedAt;
+
+  /// Parent path, or `null` at the root.
+  String? get parentPath {
+    final trimmed = path.endsWith('/') && path.length > 1
+        ? path.substring(0, path.length - 1)
+        : path;
+    final index = trimmed.lastIndexOf('/');
+    if (index <= 0) return null;
+    return trimmed.substring(0, index);
+  }
+
+  /// File extension without the dot, lowercased. Empty when there is none.
+  String get extension {
+    final dot = name.lastIndexOf('.');
+    if (dot <= 0 || dot == name.length - 1) return '';
+    return name.substring(dot + 1).toLowerCase();
+  }
+
+  RemoteNode copyWith({
+    String? path,
+    String? name,
+    bool? isDirectory,
+    int? sizeBytes,
+    DateTime? modifiedAt,
+    String? mimeType,
+    String? etag,
+    bool? isShared,
+    DateTime? indexedAt,
+  }) {
+    return RemoteNode(
+      path: path ?? this.path,
+      name: name ?? this.name,
+      isDirectory: isDirectory ?? this.isDirectory,
+      sizeBytes: sizeBytes ?? this.sizeBytes,
+      modifiedAt: modifiedAt ?? this.modifiedAt,
+      mimeType: mimeType ?? this.mimeType,
+      etag: etag ?? this.etag,
+      isShared: isShared ?? this.isShared,
+      indexedAt: indexedAt ?? this.indexedAt,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is RemoteNode &&
+      other.path == path &&
+      other.sizeBytes == sizeBytes &&
+      other.etag == etag &&
+      other.modifiedAt == modifiedAt;
+
+  @override
+  int get hashCode => Object.hash(path, sizeBytes, etag, modifiedAt);
+
+  @override
+  String toString() =>
+      'RemoteNode($path, ${isDirectory ? 'dir' : '$sizeBytes bytes'})';
+}
+
+/// A page of directory entries.
+///
+/// Puter's `readdir` returns a cursor when more pages exist; the cursor pins
+/// the sort order, so later pages must not change [ListRequest.sortBy] or
+/// [ListRequest.sortOrder].
+
+class RemoteNodePage {
+  const RemoteNodePage({
+    required this.items,
+    this.cursor,
+    this.total,
+  });
+
+  final List<RemoteNode> items;
+
+  /// Present while more pages exist. Pass to the next request verbatim.
+  final String? cursor;
+
+  /// Total entry count, when the request asked for it.
+  final int? total;
+
+  bool get hasMore => cursor != null;
+
+  @override
+  String toString() =>
+      'RemoteNodePage(${items.length} items, hasMore=$hasMore)';
+}
+
+/// How a directory listing should be shaped.
+enum NodeSortField { name, modified, type, size }
+
+enum SortOrder { ascending, descending }
+
+/// Parameters for a directory listing.
+
+class ListRequest {
+  const ListRequest({
+    required this.path,
+    this.limit,
+    this.cursor,
+    this.sortBy = NodeSortField.name,
+    this.sortOrder = SortOrder.ascending,
+    this.recursive = false,
+    this.depth,
+    this.includeTotal = false,
+  });
+
+  final String path;
+  final int? limit;
+  final String? cursor;
+  final NodeSortField sortBy;
+  final SortOrder sortOrder;
+
+  /// Walk the subtree. Prefer this over N per-file `stat` calls — it is the
+  /// single largest saving against WebDAV's shared request ceiling.
+  final bool recursive;
+  final int? depth;
+  final bool includeTotal;
+
+  /// Whether this request opts into cursor paging. Puter returns a plain array
+  /// unless a pagination parameter is present, so the presence of `cursor`
+  /// (even `null`) changes the response shape.
+  bool get isPaginated => cursor != null || includeTotal;
+}
+
+/// Live storage quota, from `fs.space()`.
+
+class StorageUsage {
+  const StorageUsage({required this.capacityBytes, required this.usedBytes});
+
+  final int capacityBytes;
+  final int usedBytes;
+
+  int get freeBytes => (capacityBytes - usedBytes).clamp(0, capacityBytes);
+
+  double get usedFraction =>
+      capacityBytes <= 0 ? 0 : (usedBytes / capacityBytes).clamp(0.0, 1.0);
+
+  bool isNearLimit(double threshold) => usedFraction >= threshold;
+
+  /// Whether a file of [bytes] fits without exceeding the quota.
+  bool canFit(int bytes) => bytes <= freeBytes;
+
+  @override
+  String toString() => 'StorageUsage($usedBytes / $capacityBytes bytes)';
+}
+
+/// Identity of the authenticated Puter account.
+
+class PuterIdentity {
+  const PuterIdentity({
+    required this.username,
+    this.email,
+    this.planTier,
+  });
+
+  final String username;
+  final String? email;
+
+  /// Detected plan, used to select the correct rate-limit column.
+  final String? planTier;
+
+  @override
+  String toString() => 'PuterIdentity($username)';
+}
+
+/// Direction of a transfer.
+enum TransferDirection { upload, download }
+
+/// Lifecycle of a transfer task.
+///
+/// Modelled explicitly because Puter's transfers are **not atomic**: a partial
+/// failure leaves earlier files written and is never rolled back, so each task
+/// must carry its own honest state.
+enum TransferState {
+  /// Waiting for capacity or connectivity.
+  queued,
+
+  /// Actively moving bytes.
+  running,
+
+  /// Paused by the user.
+  paused,
+
+  /// Finished successfully.
+  completed,
+
+  /// Failed transiently; eligible for retry.
+  failed,
+
+  /// Failed permanently and requires the user to act — quota exhausted,
+  /// plan restriction, or revoked credentials. Retrying changes nothing.
+  blocked,
+
+  /// Superseded or cancelled by the user.
+  cancelled,
+}
+
+/// One file moving in one direction.
+///
+/// Per ADR 0004 this is deliberately per-file rather than per-batch, so a
+/// single failure cannot obscure the outcome of the others.
+
+class TransferTask {
+  const TransferTask({
+    required this.id,
+    required this.direction,
+    required this.remotePath,
+    required this.localPath,
+    required this.totalBytes,
+    this.bytesDone = 0,
+    this.state = TransferState.queued,
+    this.attempts = 0,
+    this.lastError,
+    this.createdAt,
+  });
+
+  final String id;
+  final TransferDirection direction;
+  final String remotePath;
+  final String localPath;
+  final int totalBytes;
+  final int bytesDone;
+  final TransferState state;
+  final int attempts;
+  final String? lastError;
+  final DateTime? createdAt;
+
+  double get progress =>
+      totalBytes <= 0 ? 0 : (bytesDone / totalBytes).clamp(0.0, 1.0);
+
+  bool get isTerminal =>
+      state == TransferState.completed ||
+      state == TransferState.cancelled ||
+      state == TransferState.blocked;
+
+  TransferTask copyWith({
+    int? bytesDone,
+    TransferState? state,
+    int? attempts,
+    String? lastError,
+  }) {
+    return TransferTask(
+      id: id,
+      direction: direction,
+      remotePath: remotePath,
+      localPath: localPath,
+      totalBytes: totalBytes,
+      bytesDone: bytesDone ?? this.bytesDone,
+      state: state ?? this.state,
+      attempts: attempts ?? this.attempts,
+      lastError: lastError ?? this.lastError,
+      createdAt: createdAt,
+    );
+  }
+
+  @override
+  String toString() =>
+      'TransferTask(${direction.name} $remotePath ${state.name} '
+      '${(progress * 100).toStringAsFixed(1)}%)';
+}

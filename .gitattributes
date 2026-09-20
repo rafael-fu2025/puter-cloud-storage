@@ -1,0 +1,27 @@
+# Normalise line endings. The project targets Android and is developed on
+# Windows, so without this every checkout produces spurious diffs.
+* text=auto eol=lf
+
+# Windows-only tooling must keep CRLF or it will not run.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.jar binary
+*.keystore binary
+*.jks binary
+
+# Generated files are excluded from diffs and language stats.
+*.g.dart linguist-generated=true
+*.freezed.dart linguist-generated=true
+pubspec.lock linguist-generated=true
+
+# Documentation is the point of this repository — keep it prominent.
+docs/** linguist-documentation=true

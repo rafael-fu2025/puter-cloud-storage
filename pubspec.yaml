@@ -1,0 +1,69 @@
+name: puter_cloud_storage
+description: "Android client for Puter cloud storage, authenticated with a Puter auth token."
+publish_to: 'none'
+
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.8
+
+  # State management
+  flutter_riverpod: ^2.6.1
+
+  # Secure token storage (Android Keystore backed)
+  flutter_secure_storage: ^9.2.2
+
+  # HTTP transport for WebDAV (primary) and REST fallback
+  dio: ^5.7.0
+
+  # WebDAV multistatus parsing
+  xml: ^6.5.0
+
+  # Local index + transfer queue
+  drift: ^2.22.1
+  sqlite3_flutter_libs: ^0.5.28
+  path_provider: ^2.1.5
+  path: ^1.9.0
+
+  # Fallback transport: Puter.js bridge
+  flutter_inappwebview: ^6.1.5
+
+  # Platform integrations
+  local_auth: ^2.3.0
+  workmanager: ^0.6.0
+  file_picker: ^8.1.7
+  permission_handler: ^11.3.1
+
+  # Utilities
+  mime: ^2.0.0
+  crypto: ^3.0.6
+  intl: ^0.20.2
+  flutter_cache_manager: ^3.4.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+  # Pure-Dart test runner, so lib/core and lib/domain can be verified without
+  # the Flutter test harness.
+  test: ^1.25.15
+
+  # Code generation for Drift
+  drift_dev: ^2.22.1
+  build_runner: ^2.4.14
+
+  # Test doubles
+  mocktail: ^1.0.4
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/bridge/

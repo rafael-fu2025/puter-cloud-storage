@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Puter bridge</title>
+<!--
+  Puter.js bridge page — the fallback transport (ADR 0002).
+
+  Loaded by WebViewTransport into a headless WebView. It exposes a narrow RPC
+  surface to Dart: { id, method, params } in, { id, result | error } out,
+  correlated by id.
+
+  Two rules this page exists to enforce:
+
+  1. BINARY DATA DOES NOT CROSS THE BRIDGE. Returning file contents as base64
+     would inflate every transfer by ~33% and hit the JS bridge's message-size
+     limits. The bridge returns metadata and signed URLs instead; actual bytes
+     move through Dart's HTTP client. Only getReadURL and space() are here for
+     that reason.
+
+  2. NO INTERACTIVE SIGN-IN. Authentication is the token, passed in via
+     setToken(). puter.auth.signIn() is deliberately never called — the project
+     uses an auth token, not the OAuth flow (ADR 0001).
+
+  Puter.js requires an HTTP origin, not file://, so this is served from the
+  app's in-app origin rather than opened as a local file.
+-->
+<script src="https://js.puter.com/v2/"></script>
+<script>
+(function () {
+  'use strict';
+
+  var TOKEN = null;
+
+  function respond(id, payload) {
+    var message = JSON.stringify(Object.assign({ id: id }, payload));
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+      window.flutter_inappwebview.callHandler('puterBridge', message);
+    } else if (window.PuterBridgeHost) {
+      window.PuterBridgeHost.postMessage(message);
+    }
+  }
+
+  function ok(id, result) {
+    respond(id, { result: result === undefined ? null : result });
+  }
+
+  function fail(id, error) {
+    respond(id, {
+      error: {
+        message: (error && error.message) || String(error),
+        code: (error && error.code) || null,
+        status: (error && error.status) || null
+      }
+    });
+  }
+
+  // Methods are intentionally few. Anything WebDAV can do, WebDAV does — this
+  // bridge covers only what WebDAV cannot express.
+  var methods = {
+    // Bind the auth token. No sign-in flow; the token is the credential.
+    setToken: function (params) {
+      TOKEN = params.token;
+      return true;
+    },
+
+    // Verify the token works, and return the account identity.
+    getUser: function () {
+      return puter.auth.getUser();
+    },
+
+    // Live storage quota. WebDAV may expose this via RFC 4331, but when it does
+    // not, this is authoritative.
+    //   -> { capacity, used }
+    space: function () {
+      return puter.fs.space();
+    },
+
+    // A temporary URL anyone can read. Bytes are then fetched by Dart, not
+    // pushed through the bridge.
+    //   -> { url }
+    getReadURL: function (params) {
+      return puter.fs.getReadURL(params.path).then(function (url) {
+        return { url: String(url) };
+      });
+    },
+
+    // Directory listing for cross-checking against the WebDAV result.
+    // Kept metadata-only for the same reason as getReadURL.
+    readdir: function (params) {
+      return puter.fs.readdir(params.path, { limit: params.limit || 200 })
+        .then(function (items) {
+          var list = Array.isArray(items) ? items : (items.items || []);
+          return list.map(function (item) {
+            return {
+              name: item.name,
+              path: item.path,
+              isDir: !!item.is_dir,
+              size: item.size || 0,
+              modified: item.modified || null
+            };
+          });
+        });
+    },
+
+    // Month-to-date spend and remaining allowance. Egress is metered on every
+    // byte sent to a client, so the app surfaces this rather than letting a
+    // large download surprise the user.
+    getMonthlyUsage: function () {
+      return puter.auth.getMonthlyUsage();
+    }
+  };
+
+  window.puterBridge = {
+    call: function (id, method, params) {
+      if (!methods[method]) {
+        fail(id, { message: 'Unknown bridge method: ' + method });
+        return;
+      }
+      if (method !== 'setToken' && !TOKEN) {
+        fail(id, { message: 'No auth token bound. Call setToken first.' });
+        return;
+      }
+      try {
+        Promise.resolve(methods[method](params || {}))
+          .then(function (result) { ok(id, result); })
+          .catch(function (error) { fail(id, error); });
+      } catch (error) {
+        fail(id, error);
+      }
+    }
+  };
+
+  // Announce readiness so Dart knows the page and the SDK have loaded.
+  if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+    window.flutter_inappwebview.callHandler('puterBridge', JSON.stringify({
+      id: 'ready',
+      result: { ready: true, hasPuter: typeof puter !== 'undefined' }
+    }));
+  }
+})();
+</script>
+</body>
+</html>

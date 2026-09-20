@@ -1,0 +1,68 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ---------------------------------------------------------------------------
+# Credentials. The Puter auth token grants full access to the account, so
+# nothing that could carry it may ever be committed. See docs/security.md.
+# ---------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.token
+*.secret
+secrets/
+key.properties
+*.keystore
+*.jks
+google-services.json
+GoogleService-Info.plist
+
+# Phase 0 spike output — may contain account details.
+/phase0-report.txt
+
+# Local Flutter tooling state — machine-specific, not project content.
+.flutter
+.flutter_tool_state
