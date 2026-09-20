@@ -11,8 +11,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  cupertino_icons: ^1.0.8
-
   # State management
   flutter_riverpod: ^2.6.1
 
@@ -25,26 +23,37 @@ dependencies:
   # WebDAV multistatus parsing
   xml: ^6.5.0
 
-  # Local index + transfer queue
-  drift: ^2.22.1
-  sqlite3_flutter_libs: ^0.5.28
-  path_provider: ^2.1.5
-  path: ^1.9.0
-
-  # Fallback transport: Puter.js bridge
-  flutter_inappwebview: ^6.1.5
-
-  # Platform integrations
-  local_auth: ^2.3.0
-  workmanager: ^0.6.0
-  file_picker: ^8.1.7
-  permission_handler: ^11.3.1
-
-  # Utilities
-  mime: ^2.0.0
-  crypto: ^3.0.6
-  intl: ^0.20.2
-  flutter_cache_manager: ^3.4.1
+  # ---------------------------------------------------------------------------
+  # Everything below is deliberately NOT declared yet.
+  #
+  # This pubspec describes what the code uses, not what the roadmap intends. At
+  # Phase 1 that is four packages. The rest arrive with the layers that need
+  # them, and declaring them early bought nothing but a broken build.
+  #
+  # It broke in two distinct ways, both worth remembering:
+  #
+  #   1. flutter_inappwebview 6.1.5 (latest stable, Oct 2024, ~2 years stale)
+  #      fails under the Gradle 9.1.0 toolchain Flutter 3.44 generates.
+  #      flutter_inappwebview_android 1.1.3 calls
+  #      getDefaultProguardFile('proguard-android.txt'), which Gradle 9 rejects
+  #      outright. No stable release fixes it; only 6.2.0-beta.3 moves.
+  #
+  #   2. file_picker compiled against android-34 while a transitive plugin
+  #      (flutter_plugin_android_lifecycle) demanded 36, so the build died on a
+  #      compileSdk mismatch. Removing it removed the constraint.
+  #
+  # A stale or lagging plugin cannot break a build it is not part of. Add each
+  # one in the phase that uses it, and run `flutter build apk` then — not later.
+  #
+  # Phase 2 — browse UI:
+  #   drift, sqlite3_flutter_libs, path_provider, path, intl, mime
+  # Phase 3 — transfers:
+  #   crypto, flutter_cache_manager
+  # Phase 4 — WebView fallback (see docs/adr/0002):
+  #   flutter_inappwebview — BLOCKED, resolve the Gradle 9 conflict first
+  # Phase 5 — platform integration:
+  #   file_picker, permission_handler, local_auth, workmanager
+  # ---------------------------------------------------------------------------
 
 dev_dependencies:
   flutter_test:
@@ -55,9 +64,11 @@ dev_dependencies:
   # the Flutter test harness.
   test: ^1.25.15
 
-  # Code generation for Drift
-  drift_dev: ^2.22.1
-  build_runner: ^2.4.14
+  # Code generation for Drift — unused until Phase 2 declares drift itself.
+  # Commented out rather than removed: `flutter pub get` resolves them today,
+  # but they are dead weight until there is a schema to generate from.
+  # drift_dev: ^2.22.1
+  # build_runner: ^2.4.14
 
   # Test doubles
   mocktail: ^1.0.4

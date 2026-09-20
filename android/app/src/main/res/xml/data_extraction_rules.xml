@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup and device-transfer rules for Android 12 (API 31) and above.
+
+  Replaces backup_rules.xml on modern devices, which is why both files exist —
+  the older one is still read on Android 11 and below.
+
+  Same reasoning as backup_rules.xml: the auth token must not travel. Note the
+  device-transfer section is separate from cloud-backup and must be excluded
+  independently — omitting it leaves the token transferable during a
+  phone-to-phone migration, which is exactly the case docs/security.md §3 warns
+  about.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+        <exclude domain="file" path="secure_storage"/>
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+        <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+        <exclude domain="file" path="secure_storage"/>
+    </device-transfer>
+</data-extraction-rules>

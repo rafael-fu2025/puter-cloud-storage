@@ -11,7 +11,8 @@ create yourself, so there is no OAuth popup and no password to share.
 ## Status
 
 **Phase 1 — foundation.** The transport layer, request scheduler, token vault, domain model and
-error taxonomy are implemented and tested. Feature screens arrive in Phases 2–4.
+error taxonomy are implemented and tested. The app compiles and packages for release; feature
+screens arrive in Phases 2–4.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the full plan.
 
@@ -40,6 +41,7 @@ This is not a footnote. It is the project's critical unknown, and it is the firs
 | [`docs/architecture.md`](docs/architecture.md) | Layering, transport design, token handling, rate limiting, local index, transfer engine |
 | [`docs/roadmap.md`](docs/roadmap.md) | Six phases with exit criteria, plus the risk register |
 | [`docs/security.md`](docs/security.md) | Threat model for an account-wide credential, and the verification checklist |
+| [`docs/build-assessment.md`](docs/build-assessment.md) | What the toolchain can build, verified output sizes, and the five defects that only a real build exposed |
 | [`docs/adr/`](docs/adr/) | The four decisions that shape everything else |
 
 The ADRs are worth reading if you only read one thing. They record *why* the architecture looks
@@ -125,6 +127,23 @@ failed sign-ins lock the account out of WebDAV for 15 minutes.
 flutter pub get
 flutter run
 ```
+
+### Build
+
+```bash
+# Sideload — 15.4 MB for arm64-v8a, versus 43.8 MB for the fat APK
+flutter build apk --release --split-per-abi
+
+# Play Store
+flutter build appbundle --release
+```
+
+The release APK is **98.8% native libraries**. The app's own code is 0.8 MB, so splitting per ABI
+is worth 2.8× on the delivered download. Budget ~11 GB of disk for a full build cycle and keep at
+least 15 GB free.
+
+Sizes, the toolchain inventory, and the constraints worth knowing before you build are in
+[`docs/build-assessment.md`](docs/build-assessment.md).
 
 ### Test
 

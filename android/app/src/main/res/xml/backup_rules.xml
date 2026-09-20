@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Backup rules for Android 11 (API 30) and below.
+
+  Implements docs/security.md §3: the auth token must never leave the device via
+  auto-backup. The token lives in flutter_secure_storage, which on Android is
+  EncryptedSharedPreferences backed by a Keystore key.
+
+  That Keystore key is hardware-bound and is never backed up. So restoring this
+  file onto another device would not merely leak the token — it would restore
+  ciphertext that nothing can decrypt, leaving the app holding a corrupt
+  credential it cannot distinguish from a valid one. Excluding it is correct on
+  both counts.
+-->
+<full-backup-content>
+    <!-- flutter_secure_storage 9.x writes here. -->
+    <exclude domain="sharedpref" path="FlutterSecureStorage.xml"/>
+    <exclude domain="sharedpref" path="FlutterSecureStorage"/>
+    <!-- Older versions, and any future migration off EncryptedSharedPreferences. -->
+    <exclude domain="file" path="secure_storage"/>
+</full-backup-content>

@@ -1,8 +1,31 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Essential. Without this the release build has no network access at all:
+         the app installs, launches, and fails every operation. Flutter's template
+         declares INTERNET only in the debug and profile manifests, for hot reload,
+         so a debug build works and hides the problem completely. Confirmed absent
+         from a real release APK — see docs/build-assessment.md.
+
+         docs/security.md §10: request only what a feature needs. These two are
+         needed by every feature, from the first screen onward. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <!-- Lets the app distinguish "no network" from "server unreachable" instead
+         of showing a generic failure for both. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+
+    <!-- Phase 3 (transfers) will need these; adding them before they are used
+         would trip Play Store review for unused sensitive permissions.
+        <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+        <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+        <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    -->
+
     <application
-        android:label="puter_cloud_storage"
+        android:label="Puter Cloud Storage"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules">
         <activity
             android:name=".MainActivity"
             android:exported="true"
