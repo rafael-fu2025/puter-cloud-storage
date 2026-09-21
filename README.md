@@ -10,28 +10,44 @@ create yourself, so there is no OAuth popup and no password to share.
 
 ## Status
 
-**Phases 1–4 are implemented.** The app is a working file manager: it authenticates with a Puter
-auth token, browses a real account, searches, and moves files in both directions through a
-persistent per-file transfer queue.
+**Phases 1–4 are implemented.** The app is a working file manager: it connects with a Puter access
+key, browses a real account, searches, and moves files in both directions through a persistent
+per-file transfer queue.
 
 | Area | State |
 |---|---|
-| Onboarding | Welcome disclosure, token entry, one validation attempt, honest error states |
-| Browse | Folder listing, breadcrumbs, list and grid, four sort fields, pull-to-refresh, storage meter |
+| Onboarding | Three steps, the security disclosure in plain language, one validation attempt |
+| Browse | Folder listing, list and grid, four sort fields, pull-to-refresh, jump-to-folder |
 | Folders | Create, rename, move, copy, delete, details — each followed by a reconciling refresh |
-| Uploads | Multi-select from the device, streamed from disk, quota pre-check, resumable queue |
+| Uploads | Multi-select from the device, streamed from disk, quota pre-check, durable queue |
 | Downloads | Streamed to a staging file, `Range` resume, open-with, save-to-device |
-| Transfers | Per-file state, pause/resume/cancel/retry, queue that survives the process being killed |
-| Search | As-you-type over the local index, scoped to a folder or the whole account |
-| Settings | View mode, sort defaults, cache management, sign-out, diagnostics |
-| Diagnostics | Transport, endpoint, capabilities, per-class rate-limit budget, quota |
+| Transfers | Per-file state, inline pause/resume/cancel/retry, survives the process being killed |
+| Search | As-you-type over files saved on the device, scoped to a folder or everywhere |
+| Settings | Layout, sorting, storage, saved files, disconnect |
+| Diagnostics | Behind seven taps on the version row, in plain language |
 
-Two limits are stated in the UI rather than hidden, because pretending otherwise would be a lie:
+### Design
 
-- **Search covers only what has been indexed.** Puter offers no server-side filesystem search, so
-  the app searches its own copy — and the search screen says how many entries that is.
+The interface is a deliberate design language rather than unstyled Material — see
+[`lib/core/ui/design.dart`](lib/core/ui/design.dart), which is the single place that decides colour,
+type, shape, spacing and motion. Four decisions carry it:
+
+- **Tonal, not shadowed.** Depth comes from the surface ramp; shadows are reserved for sheets and
+  the FAB. A drop shadow under every one of 500 rows is noise, not hierarchy.
+- **One accent.** Puter's blue marks the primary action and the current location, and nothing else,
+  so "what can I press here" is never a question.
+- **Semantic colour is scarce.** Red means something is wrong and the user must act. It is never
+  decoration — which is why PDFs are no longer tinted error-red and the onboarding disclosure is no
+  longer an alarm card.
+- **Plain language.** No screen names the transport protocol, prints an HTTP status, or cites an
+  internal design document. A regression test enforces this.
+
+### Limits the UI states rather than hides
+
+- **Search covers only files saved on the device.** Puter offers no server-side filesystem search,
+  so the app searches its own copy — and says how many files that is, and how to add more.
 - **Pausing an upload restarts it.** WebDAV `PUT` with `Content-Range` is unverified, so
-  `canResumeUpload` is `false` and the transfers screen says so instead of implying otherwise.
+  `canResumeUpload` is `false`. The transfers screen says so where it matters.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for the plan. Phases 5–6 — photo auto-backup, preview,
 sharing, offline mutation replay, multi-account — remain.
@@ -172,14 +188,14 @@ Sizes, the toolchain inventory, and the constraints worth knowing before you bui
 
 ```bash
 flutter analyze                     # static analysis, strict rules
-flutter test                        # 103 unit and widget tests
+flutter test                        # 115 unit and widget tests
 
 # Verification that needs no Puter account, no network, and no test framework
 dart run tool/verify/verify_core.dart        # 21 checks — error taxonomy, scheduler, limits
-dart run tool/verify/verify_transport.dart   # 64 checks — WebDAV transport against a live fixture
+dart run tool/verify/verify_transport.dart   # 70 checks — WebDAV transport against a live fixture
 
 # On a connected device: the Android-only pieces, which the host cannot test
-flutter test integration_test -d <device>    # 8 checks — Keystore, SQLite, platform channel
+flutter test integration_test -d <device>    # 10 checks — Keystore, SQLite, platform channel
 ```
 
 The two `verify_*` scripts exist because `flutter test` and `dart test` both fail in some
@@ -197,12 +213,22 @@ It found four real defects the first time it ran.
 
 `integration_test/` covers what a host test cannot: the Keystore-backed vault, the bundled SQLite
 native library, `path_provider`, and the `MethodChannel` in `MainActivity.kt`. Those fail at
-runtime rather than at compile time, so they need a real device — and one of them,
-`100%_report.pdf`, exists specifically to prove the `LIKE` escaping in the index works.
+runtime rather than at compile time, so they need a real device — and two of them exist purely to
+pin down safety properties of the platform layer: that the URL opener refuses any scheme other than
+`http(s)`, and that the staging cleaner will not delete a file outside its own directory.
 
 The transfer suite is where the interesting assertions live: a task persisted as `running` comes
 back `queued` after a restart, a `413` blocks without spending a retry, cancelling is not recorded
 as failing, and concurrency never exceeds the cap.
+
+Two gaps in this suite are worth knowing about, because both let real bugs through:
+
+- The transport checks used to upload only to the root (where there is no parent to create) and into
+  paths whose parents did not exist. **No check uploaded into a folder that already existed** — the
+  case every real upload hits — so a bug that broke every upload by a user left the suite green.
+  There are now checks for it, and `_checkSucceeds` reports a failure instead of aborting the run.
+- The widget tests assert layout at 1.6× text scale, because Flutter throws on overflow. One card
+  had been overflowing by 59px with nothing catching it.
 
 ---
 
@@ -214,12 +240,13 @@ lib/
 ├── core/
 │   ├── config/             AppConfig, endpoints, plan tiers
 │   ├── error/              PuterException, error taxonomy, ErrorMapper, user-facing copy
-│   ├── format/             Byte and date formatting, file-type icons
+│   ├── format/             Byte and date formatting, file-type icons and tints
 │   ├── network/            RequestScheduler, token buckets, backoff
-│   └── security/           TokenVault, credential redaction
+│   ├── security/           TokenVault, credential redaction
+│   └── ui/                 The design language and the components built from it
 ├── data/
 │   ├── database/           Drift schema, the local index, NodeCache
-│   ├── platform/           The MethodChannel bridge for pick / export / open
+│   ├── platform/           The MethodChannel bridge: pick, export, open, links
 │   ├── repositories/       FileRepository, SettingsRepository
 │   ├── transfer/           TransferEngine, persistent queue store
 │   └── transport/          PuterTransport + WebDAV implementation

@@ -1,209 +1,178 @@
-/// Settings and diagnostics.
+/// Settings, and the technical screen behind a gate.
 ///
-/// Diagnostics is not a debug screen bolted on at the end — it is the answer to
-/// a real support question. The app's most likely failure mode is not a crash,
-/// it is a connection that is *working but slow*, because WebDAV's 600
-/// requests/min is shared per network (`docs/puter-api-research.md` §5). When
-/// that happens the user needs to see which request class is saturated, and
-/// which host is actually serving them, without a debugger.
+/// Settings is written for the person who owns the phone. It says "Connected
+/// to Puter", not a hostname; "Storage space", not "quota"; "Saved on this
+/// phone", not "local index". Everything an engineer would want —
+/// the endpoint, the per-class request budget, the breaker state — moved into
+/// [DiagnosticsScreen], reached by tapping the version row seven times.
+///
+/// That gate is not hiding anything. It is the difference between an app that
+/// looks like it was built for its user and one that looks like it was built
+/// for its author.
 library;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../app/providers.dart';
+import '../../app/session.dart';
 import '../../core/config/app_config.dart';
 import '../../core/format/formatters.dart';
-import '../../core/network/request_scheduler.dart';
+import '../../core/ui/components.dart';
+import '../../core/ui/design.dart';
+import '../../data/platform/platform_bridge.dart';
+import '../../data/repositories/file_repository.dart';
 import '../../data/repositories/settings_repository.dart';
 import '../../domain/entities/remote_node.dart';
 import '../browser/browser_providers.dart';
+import '../browser/sort_sheet.dart';
+import 'diagnostics_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final session = ref.watch(sessionProvider).valueOrNull;
-    final repository = ref.watch(fileRepositoryProvider);
-    final preferences = ref.watch(browserPreferencesProvider).valueOrNull ??
-        const BrowserPreferences();
+    final SessionState? session = ref.watch(sessionProvider).valueOrNull;
+    final FileRepository? repository = ref.watch(fileRepositoryProvider);
+    final bool canWrite = repository?.capabilities.canWrite ?? true;
+    final BrowserPreferences preferences =
+        ref.watch(browserPreferencesProvider).valueOrNull ??
+            const BrowserPreferences();
 
     return Scaffold(
       appBar: AppBar(title: const Text('Settings')),
       body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
+        padding: const EdgeInsets.only(top: AppSpacing.lg, bottom: AppSpacing.xxl),
         children: <Widget>[
-          const _SectionHeader(label: 'Account'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                ListTile(
-                  leading: const Icon(Icons.cloud_done_outlined),
-                  title: const Text('Connected'),
-                  subtitle: Text(
-                    session?.endpoint ?? 'unknown host',
-                    overflow: TextOverflow.ellipsis,
-                  ),
+          SectionCard(
+            title: 'Account',
+            children: <Widget>[
+              AppListRow(
+                leading: const Icon(Icons.cloud_done_rounded),
+                title: const Text('Connected to Puter'),
+                subtitle: Text(
+                  session?.status == SessionStatus.ready
+                      ? 'Your files are in your own Puter account'
+                      : 'Not connected',
                 ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.hub_outlined),
-                  title: const Text('Transport'),
-                  subtitle: Text(
-                    repository == null
-                        ? 'none'
-                        : '${repository.transportName} · '
-                            '${repository.capabilities}',
-                    maxLines: 2,
-                  ),
+              ),
+              const AppDivider(),
+              AppListRow(
+                leading: Icon(
+                  Icons.logout_rounded,
+                  color: Theme.of(context).colorScheme.error,
                 ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: Icon(
-                    Icons.logout,
-                    color: Theme.of(context).colorScheme.error,
+                title: const Text('Disconnect'),
+                subtitle: const Text(
+                  'Forgets the access key and removes saved file lists from '
+                  'this phone. Nothing is deleted from Puter.',
+                ),
+                isDestructive: true,
+                onTap: () => _confirmSignOut(context, ref),
+              ),
+            ],
+          ),
+
+          SectionCard(
+            title: 'Storage',
+            children: <Widget>[
+              const _StorageRow(),
+              if (!canWrite) ...<Widget>[
+                const AppDivider(),
+                const AppListRow(
+                  leading: Icon(Icons.lock_outline_rounded),
+                  title: Text('Read-only account'),
+                  subtitle: Text(
+                    'This Puter account does not allow changes, so uploading '
+                    'and creating folders are unavailable.',
                   ),
-                  title: Text(
-                    'Sign out',
-                    style: TextStyle(
-                      color: Theme.of(context).colorScheme.error,
-                    ),
-                  ),
-                  subtitle: const Text(
-                    'Forgets the token and clears the local index',
-                  ),
-                  onTap: () => _confirmSignOut(context, ref),
                 ),
               ],
-            ),
+            ],
           ),
-          const _SectionHeader(label: 'Browsing'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                ListTile(
-                  leading: const Icon(Icons.view_list_outlined),
-                  title: const Text('Default view'),
-                  trailing: SegmentedButton<BrowserViewMode>(
-                    segments: const <ButtonSegment<BrowserViewMode>>[
-                      ButtonSegment<BrowserViewMode>(
-                        value: BrowserViewMode.list,
-                        icon: Icon(Icons.view_list),
-                        tooltip: 'List',
-                      ),
-                      ButtonSegment<BrowserViewMode>(
-                        value: BrowserViewMode.grid,
-                        icon: Icon(Icons.grid_view),
-                        tooltip: 'Grid',
-                      ),
-                    ],
-                    selected: <BrowserViewMode>{preferences.viewMode},
-                    onSelectionChanged: (Set<BrowserViewMode> selection) => ref
-                        .read(browserPreferencesProvider.notifier)
-                        .apply(
-                          (BrowserPreferences current) =>
-                              current.copyWith(viewMode: selection.first),
-                        ),
-                    showSelectedIcon: false,
-                  ),
+
+          SectionCard(
+            title: 'Browsing',
+            children: <Widget>[
+              AppListRow(
+                leading: const Icon(Icons.view_list_rounded),
+                title: const Text('How files are laid out'),
+                subtitle: Text(
+                  preferences.viewMode == BrowserViewMode.grid
+                      ? 'Grid'
+                      : 'List',
                 ),
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.sort),
-                  title: const Text('Default sort'),
-                  subtitle: Text(sortFieldLabel(preferences.sortField)),
-                  onTap: () => _pickSort(context, ref, preferences),
-                ),
-                const Divider(height: 1),
-                SwitchListTile(
-                  secondary: const Icon(Icons.folder_outlined),
-                  title: const Text('Folders first'),
-                  subtitle: const Text('Keep directories above files'),
-                  value: preferences.foldersFirst,
-                  onChanged: (bool value) => ref
+                trailing: SegmentedButton<BrowserViewMode>(
+                  segments: const <ButtonSegment<BrowserViewMode>>[
+                    ButtonSegment<BrowserViewMode>(
+                      value: BrowserViewMode.list,
+                      icon: Icon(Icons.view_list_rounded, size: 18),
+                      tooltip: 'List',
+                    ),
+                    ButtonSegment<BrowserViewMode>(
+                      value: BrowserViewMode.grid,
+                      icon: Icon(Icons.grid_view_rounded, size: 18),
+                      tooltip: 'Grid',
+                    ),
+                  ],
+                  selected: <BrowserViewMode>{preferences.viewMode},
+                  onSelectionChanged: (Set<BrowserViewMode> selection) => ref
                       .read(browserPreferencesProvider.notifier)
                       .apply(
                         (BrowserPreferences current) =>
-                            current.copyWith(foldersFirst: value),
+                            current.copyWith(viewMode: selection.first),
                       ),
-                ),
-              ],
-            ),
-          ),
-          const _SectionHeader(label: 'Storage'),
-          const _StorageSection(),
-          const _SectionHeader(label: 'Diagnostics'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: ListTile(
-              leading: const Icon(Icons.monitor_heart_outlined),
-              title: const Text('Connection and rate limits'),
-              subtitle: const Text(
-                'Transport, request budget and quota',
-              ),
-              trailing: const Icon(Icons.chevron_right),
-              onTap: () => Navigator.of(context).push(
-                MaterialPageRoute<void>(
-                  builder: (_) => const DiagnosticsScreen(),
+                  showSelectedIcon: false,
                 ),
               ),
-            ),
+              const AppDivider(),
+              AppListRow(
+                leading: const Icon(Icons.sort_rounded),
+                title: const Text('Sort files by'),
+                subtitle: Text(
+                  '${sortFieldLabel(preferences.sortField)} · '
+                  '${preferences.sortOrder == SortOrder.ascending ? 'A–Z' : 'Z–A'}',
+                ),
+                onTap: () => showSortSheet(context, ref, preferences),
+              ),
+              const AppDivider(),
+              SwitchListTile(
+                value: preferences.foldersFirst,
+                onChanged: (bool value) => ref
+                    .read(browserPreferencesProvider.notifier)
+                    .apply(
+                      (BrowserPreferences current) =>
+                          current.copyWith(foldersFirst: value),
+                    ),
+                title: const Text('Folders at the top'),
+                subtitle: const Text('Keep folders above files in every list'),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.lg,
+                ),
+              ),
+            ],
           ),
-          const _SectionHeader(label: 'About'),
-          const _AboutSection(),
-        ],
-      ),
-    );
-  }
 
-  Future<void> _pickSort(
-    BuildContext context,
-    WidgetRef ref,
-    BrowserPreferences preferences,
-  ) async {
-    // Plain ListTiles with a check mark rather than RadioListTile: the radio
-    // group API was deprecated in Flutter 3.32 in favour of a RadioGroup
-    // ancestor, and a ticked list needs neither.
-    final field = await showDialog<NodeSortField>(
-      context: context,
-      builder: (BuildContext dialogContext) => SimpleDialog(
-        title: const Text('Sort by'),
-        children: <Widget>[
-          for (final option in NodeSortField.values)
-            ListTile(
-              leading: Icon(
-                option == preferences.sortField
-                    ? Icons.radio_button_checked
-                    : Icons.radio_button_unchecked,
-                color: option == preferences.sortField
-                    ? Theme.of(dialogContext).colorScheme.primary
-                    : null,
-              ),
-              title: Text(sortFieldLabel(option)),
-              onTap: () => Navigator.of(dialogContext).pop(option),
-            ),
+          const _AboutCard(),
         ],
       ),
     );
-    if (field == null) return;
-    await ref.read(browserPreferencesProvider.notifier).apply(
-          (BrowserPreferences current) => current.copyWith(sortField: field),
-        );
   }
 
   Future<void> _confirmSignOut(BuildContext context, WidgetRef ref) async {
-    final confirmed = await showDialog<bool>(
+    final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext dialogContext) => AlertDialog(
-        title: const Text('Sign out?'),
+        icon: Icon(
+          Icons.logout_rounded,
+          color: Theme.of(dialogContext).colorScheme.error,
+        ),
+        title: const Text('Disconnect this phone?'),
         content: const Text(
-          'The stored token will be erased from this device, and the local '
-          'index will be cleared so one account’s file names can never appear '
-          'under another. Nothing is deleted from your Puter account, and your '
-          'transfer list is cleared.',
+          'The access key will be erased from this device, and the list of '
+          'files saved for offline browsing will be cleared. Your files stay '
+          'exactly where they are in your Puter account.',
         ),
         actions: <Widget>[
           TextButton(
@@ -212,402 +181,217 @@ class SettingsScreen extends ConsumerWidget {
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
             ),
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Sign out'),
+            child: const Text('Disconnect'),
           ),
         ],
       ),
     );
 
     if (confirmed != true) return;
-    // The gate above reacts to the session state, so there is no navigation to
-    // perform here — which is what keeps this the only place sign-out happens.
     await ref.read(sessionProvider.notifier).signOut();
   }
 }
 
-/// Quota and cache, side by side because they are the same question: what is
-/// taking up room, here and there.
-class _StorageSection extends ConsumerWidget {
-  const _StorageSection();
+/// Storage space, with the numbers only when they are known.
+class _StorageRow extends ConsumerWidget {
+  const _StorageRow();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final StorageUsage? usage = ref.watch(storageUsageProvider).valueOrNull;
+    final int? saved = ref.watch(cacheSizeProvider).valueOrNull;
     final theme = Theme.of(context);
-    final usage = ref.watch(storageUsageProvider).valueOrNull;
-    final cacheSize = ref.watch(cacheSizeProvider).valueOrNull;
-    final repository = ref.watch(fileRepositoryProvider);
+    final double threshold = ref.watch(appConfigProvider).quotaWarningThreshold;
+    final bool isNearlyFull = usage != null && usage.isNearLimit(threshold);
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12),
-      child: Column(
-        children: <Widget>[
-          ListTile(
-            leading: const Icon(Icons.pie_chart_outline),
-            title: const Text('Puter storage'),
-            subtitle: usage == null
-                ? const Text(
-                    'This server does not report quota over WebDAV. The Puter '
-                    'web app shows it.',
-                  )
-                : Text(
-                    '${ByteFormat.format(usage.usedBytes)} of '
-                    '${ByteFormat.format(usage.capacityBytes)} used '
-                    '(${usage.percentage.toStringAsFixed(1)}%)',
-                  ),
-            trailing: IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: 'Refresh',
-              onPressed: () => ref.invalidate(storageUsageProvider),
-            ),
+    return Column(
+      children: <Widget>[
+        AppListRow(
+          leading: Icon(
+            isNearlyFull ? Icons.sd_card_alert_outlined : Icons.pie_chart_outline_rounded,
+            color: isNearlyFull ? theme.colorScheme.error : null,
           ),
-          const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.storage_outlined),
-            title: const Text('Local index'),
-            subtitle: Text(
-              cacheSize == null || cacheSize == 0
-                  ? 'Nothing indexed yet'
-                  : '$cacheSize entries on this device',
-            ),
+          title: const Text('Puter storage space'),
+          subtitle: Text(
+            usage == null
+                ? 'Puter did not report how much space is left. The Puter '
+                    'website shows it.'
+                : '${ByteFormat.format(usage.usedBytes)} of '
+                    '${ByteFormat.format(usage.capacityBytes)} used · '
+                    '${ByteFormat.format(usage.freeBytes)} free',
           ),
-          if (cacheSize != null && cacheSize > 0) ...<Widget>[
-            const Divider(height: 1),
-            ListTile(
-              leading: Icon(Icons.delete_sweep_outlined, color: theme.colorScheme.error),
-              title: Text(
-                'Clear local index',
-                style: TextStyle(color: theme.colorScheme.error),
-              ),
-              subtitle: const Text(
-                'Frees space on the device. Nothing is removed from Puter; '
-                'folders are re-indexed the next time you open them.',
-              ),
-              onTap: repository == null
-                  ? null
-                  : () async {
-                      await repository.clearCache();
-                      ref.invalidate(cacheSizeProvider);
-                      if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Local index cleared.')),
-                      );
-                    },
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _AboutSection extends StatelessWidget {
-  const _AboutSection();
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12),
-      child: Column(
-        children: <Widget>[
-          const ListTile(
-            leading: Icon(Icons.info_outline),
-            title: Text('Puter Cloud Storage'),
-            subtitle: Text('Version 0.1.0 · Android client for Puter'),
+          trailing: IconButton(
+            icon: const Icon(Icons.refresh_rounded),
+            tooltip: 'Check again',
+            onPressed: () => ref.invalidate(storageUsageProvider),
           ),
-          const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.open_in_new),
-            title: const Text('Built on Puter'),
-            subtitle: const Text(PuterEndpoints.attributionUrl),
-            onTap: () => _showCopyHint(context, PuterEndpoints.attributionUrl),
-          ),
-          const Divider(height: 1),
-          ListTile(
-            leading: const Icon(Icons.key_outlined),
-            title: const Text('Manage your API token'),
-            subtitle: const Text(PuterEndpoints.dashboardAccount),
-            onTap: () =>
-                _showCopyHint(context, PuterEndpoints.dashboardAccount),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// The URLs are shown as copyable text rather than being opened.
-  ///
-  /// Launching a browser from here would need `url_launcher`, and the app
-  /// deliberately keeps its plugin surface to what it cannot do itself — see
-  /// `docs/build-assessment.md` §4.4. A selectable string costs the user one
-  /// long-press.
-  static void _showCopyHint(BuildContext context, String url) {
-    ScaffoldMessenger.of(context)
-      ..hideCurrentSnackBar()
-      ..showSnackBar(
-        const SnackBar(
-          content: Text('Long-press the address to copy it, then open it in '
-              'your browser.'),
         ),
-      );
-  }
-}
-
-// ------------------------------------------------------------------ diagnostics
-
-/// What is actually happening on the wire.
-class DiagnosticsScreen extends ConsumerWidget {
-  const DiagnosticsScreen({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final scheduler = ref.watch(requestSchedulerProvider);
-    final repository = ref.watch(fileRepositoryProvider);
-    final config = ref.watch(appConfigProvider);
-    final session = ref.watch(sessionProvider).valueOrNull;
-    final usage = ref.watch(storageUsageProvider).valueOrNull;
-    final health = scheduler.health;
-
-    return Scaffold(
-      appBar: AppBar(title: const Text('Diagnostics')),
-      body: ListView(
-        padding: const EdgeInsets.only(bottom: 32),
-        children: <Widget>[
-          const _SectionHeader(label: 'Connection'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                _InfoRow(
-                  label: 'Endpoint',
-                  value: session?.endpoint ?? 'not connected',
-                ),
-                _InfoRow(
-                  label: 'Transport',
-                  value: repository?.transportName ?? 'none',
-                ),
-                _InfoRow(
-                  label: 'Auth attempts left',
-                  value: scheduler.authAttemptSafe
-                      ? 'safe to retry'
-                      : 'LOCKED — wait 15 minutes',
-                  isProblem: !scheduler.authAttemptSafe,
-                ),
-                _InfoRow(
-                  label: 'Capabilities',
-                  value: repository?.capabilities.toString() ?? '—',
-                ),
-              ],
-            ),
-          ),
-          const _SectionHeader(label: 'Request budget'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                _InfoRow(label: 'Queued now', value: '${scheduler.queuedCount}'),
-                _InfoRow(
-                  label: 'In flight now',
-                  value: '${scheduler.totalInFlight} of '
-                      '${config.maxConcurrentRequests}',
-                ),
-                const Divider(height: 1),
-                for (final entry in health.entries)
-                  _ClassRow(klass: entry.key, health: entry.value),
-              ],
-            ),
-          ),
-          const _SectionHeader(label: 'Quota'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                if (usage == null)
-                  const ListTile(
-                    leading: Icon(Icons.help_outline),
-                    title: Text('Quota unavailable'),
-                    subtitle: Text(
-                      'The server did not report RFC 4331 quota properties.',
-                    ),
-                  )
-                else ...<Widget>[
-                  _InfoRow(
-                    label: 'Used',
-                    value: ByteFormat.format(usage.usedBytes),
-                  ),
-                  _InfoRow(
-                    label: 'Capacity',
-                    value: ByteFormat.format(usage.capacityBytes),
-                  ),
-                  _InfoRow(
-                    label: 'Free',
-                    value: ByteFormat.format(usage.freeBytes),
-                  ),
-                ],
-                const Divider(height: 1),
-                ListTile(
-                  leading: const Icon(Icons.refresh),
-                  title: const Text('Re-check quota and connection'),
-                  onTap: () {
-                    ref.invalidate(storageUsageProvider);
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Re-checking…')),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-          const _SectionHeader(label: 'Configuration'),
-          Card(
-            margin: const EdgeInsets.symmetric(horizontal: 12),
-            child: Column(
-              children: <Widget>[
-                _InfoRow(
-                  label: 'Plan tier',
-                  value: config.planTier.name,
-                ),
-                _InfoRow(
-                  label: 'Page size',
-                  value: '${config.listingPageSize} entries',
-                ),
-                _InfoRow(
-                  label: 'Concurrent transfers',
-                  value: '${config.maxConcurrentTransfers}',
-                ),
-                _InfoRow(
-                  label: 'Retry budget',
-                  value: '${config.maxRetryAttempts} attempts',
-                ),
-                _InfoRow(
-                  label: 'Cache TTL',
-                  value: '${config.listingCacheTtl.inSeconds}s',
-                ),
-                _InfoRow(
-                  label: 'Configured mode',
-                  value: config.transportMode.name,
-                ),
-              ],
-            ),
-          ),
+        if (usage != null) ...<Widget>[
+          const AppDivider(),
           Padding(
-            padding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-            child: Text(
-              'Rate limits are shared per network, not per app: WebDAV allows '
-              '600 requests a minute and 10 concurrent across everything on '
-              'this connection. When a request class shows as saturated, the '
-              'app serves cached data and waits rather than failing.\n\n'
-              'WebDAV is currently the only implemented transport. The WebView '
-              'bridge described in ADR 0002 cannot be built against the current '
-              'toolchain, so the configured mode above records an intention '
-              'rather than a choice (§4.4 of the build assessment).',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+            padding: const EdgeInsets.fromLTRB(
+              AppSpacing.lg,
+              AppSpacing.md,
+              AppSpacing.lg,
+              AppSpacing.md,
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(3),
+              child: LinearProgressIndicator(
+                value: usage.usedFraction,
+                semanticsLabel: 'Puter storage space used',
+                color: isNearlyFull
+                    ? theme.colorScheme.error
+                    : theme.colorScheme.primary,
+              ),
+            ),
+          ),
+        ],
+        const AppDivider(),
+        AppListRow(
+          leading: const Icon(Icons.smartphone_rounded),
+          title: const Text('Files saved on this phone'),
+          subtitle: Text(
+            saved == null || saved == 0
+                ? 'Nothing saved yet. Opening a folder saves it for offline '
+                    'browsing and search.'
+                : '$saved files · used for offline browsing and search',
+          ),
+          trailing: saved == null || saved == 0
+              ? null
+              : IconButton(
+                  icon: Icon(
+                    Icons.delete_sweep_outlined,
+                    color: theme.colorScheme.error,
                   ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// One request class's current state.
-class _ClassRow extends StatelessWidget {
-  const _ClassRow({required this.klass, required this.health});
-
-  final RequestClass klass;
-  final ClassHealth health;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    // Out of budget this minute, or the breaker has tripped for this class:
-    // either way the scheduler is serving cached data instead of calling out.
-    final isSaturated = health.breakerOpen || health.remainingThisMinute <= 0;
-
-    return ListTile(
-      dense: true,
-      leading: Icon(
-        isSaturated ? Icons.pause_circle_outline : Icons.check_circle_outline,
-        size: 20,
-        color:
-            isSaturated ? theme.colorScheme.error : theme.colorScheme.primary,
-      ),
-      title: Text(klass.name),
-      subtitle: Text(
-        health.breakerOpen
-            ? 'Circuit open — serving cached data'
-            : '${health.inFlight} in flight · '
-                '${health.remainingThisMinute} left this minute',
-      ),
-    );
-  }
-}
-
-class _InfoRow extends StatelessWidget {
-  const _InfoRow({
-    required this.label,
-    required this.value,
-    this.isProblem = false,
-  });
-
-  final String label;
-  final String value;
-  final bool isProblem;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          SizedBox(
-            width: 140,
-            child: Text(
-              label,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          Expanded(
-            child: SelectableText(
-              value,
-              style: theme.textTheme.bodyMedium?.copyWith(
-                color: isProblem ? theme.colorScheme.error : null,
-                fontWeight: isProblem ? FontWeight.w600 : null,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.label});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 24, 20, 8),
-      child: Text(
-        label.toUpperCase(),
-        style: theme.textTheme.labelSmall?.copyWith(
-          color: theme.colorScheme.primary,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
+                  tooltip: 'Clear saved files',
+                  onPressed: () => _confirmClear(context, ref),
+                ),
         ),
+      ],
+    );
+  }
+
+  Future<void> _confirmClear(BuildContext context, WidgetRef ref) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text('Clear saved files?'),
+        content: const Text(
+          'Frees space on this phone. Nothing is removed from Puter — the '
+          'files come back the next time you open their folders.',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Clear'),
+          ),
+        ],
       ),
+    );
+    if (confirmed != true) return;
+
+    final repository = ref.read(fileRepositoryProvider);
+    if (repository == null) return;
+    await repository.clearCache();
+    ref.invalidate(cacheSizeProvider);
+  }
+}
+
+/// Version row — and, seven taps in, the way into diagnostics.
+class _AboutCard extends ConsumerStatefulWidget {
+  const _AboutCard();
+
+  @override
+  ConsumerState<_AboutCard> createState() => _AboutCardState();
+}
+
+class _AboutCardState extends ConsumerState<_AboutCard> {
+  static const int _tapsRequired = 7;
+  int _taps = 0;
+
+  void _onVersionTap() {
+    _taps++;
+    if (_taps < _tapsRequired) {
+      // Tell the user something is happening after the third tap, so the
+      // gesture is discoverable rather than a secret.
+      if (_taps >= 3) {
+        final int remaining = _tapsRequired - _taps;
+        ScaffoldMessenger.maybeOf(context)?..hideCurrentSnackBar()
+          ..showSnackBar(
+            SnackBar(
+              duration: const Duration(seconds: 1),
+              content: Text(
+                '$remaining more ${remaining == 1 ? 'tap' : 'taps'} for '
+                'technical details',
+              ),
+            ),
+          );
+      }
+      return;
+    }
+
+    _taps = 0;
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(builder: (_) => const DiagnosticsScreen()),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
+    return SectionCard(
+      children: <Widget>[
+        AppListRow(
+          leading: const Icon(Icons.info_outline_rounded),
+          title: const Text('Puter Cloud Storage'),
+          subtitle: const Text('Version 0.1.0'),
+          onTap: _onVersionTap,
+        ),
+        const AppDivider(),
+        AppListRow(
+          leading: const Icon(Icons.favorite_outline_rounded),
+          title: const Text('Built on Puter'),
+          subtitle: const Text(PuterEndpoints.attributionUrl),
+          onTap: () => _open(context, PuterEndpoints.attributionUrl),
+        ),
+        const AppDivider(),
+        AppListRow(
+          leading: const Icon(Icons.key_rounded),
+          title: const Text('Manage your access keys'),
+          subtitle: const Text('Create or revoke keys on your Puter account'),
+          onTap: () => _open(context, PuterEndpoints.dashboardAccount),
+        ),
+        const AppDivider(),
+        Padding(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          child: Text(
+            'This app talks to your own Puter account. It keeps no servers '
+            'and no copy of your files — only the folder listings it needs to '
+            'work offline.',
+            style: theme.textTheme.bodySmall,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _open(BuildContext context, String url) async {
+    final bool opened = await PlatformBridge.openUrl(url);
+    if (opened || !context.mounted) return;
+    // A device with no browser still gets the address, as selectable text
+    // rather than a dead tap.
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+      SnackBar(content: SelectableText(url)),
     );
   }
 }

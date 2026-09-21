@@ -157,7 +157,31 @@ void main() {
       final ErrorPresentation presentation = ErrorPresenter.describe(
         const PuterException(PuterErrorKind.storageLimitReached, 'x'),
       );
-      expect(presentation.message, contains('Free space'));
+      // The user has to be told the way out, not just the symptom.
+      final String copy =
+          '${presentation.title} ${presentation.message}'.toLowerCase();
+      expect(copy, contains('storage'));
+      expect(copy, contains('delete'));
+      expect(
+        presentation.canRetry,
+        isFalse,
+        reason: 'no amount of retrying frees space',
+      );
+    });
+
+    test('no user-facing copy leaks the transport protocol', () {
+      // "WebDAV" is an implementation detail. A user cannot act on it, and
+      // seeing it makes a normal condition look like a defect.
+      for (final PuterErrorKind kind in PuterErrorKind.values) {
+        final ErrorPresentation presentation =
+            ErrorPresenter.describe(PuterException(kind, 'detail'));
+        final String copy =
+            '${presentation.title} ${presentation.message}'.toLowerCase();
+        expect(copy, isNot(contains('webdav')), reason: kind.name);
+        expect(copy, isNot(contains('token')), reason: kind.name);
+        expect(copy, isNot(contains('http')), reason: kind.name);
+        expect(copy, isNot(contains('transport')), reason: kind.name);
+      }
     });
 
     test('names the path in a not-found message', () {

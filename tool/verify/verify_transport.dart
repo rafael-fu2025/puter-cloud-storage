@@ -57,6 +57,21 @@ Future<void> _checkThrows(
   }
 }
 
+/// Assert that [body] completes without throwing.
+///
+/// Exists so a failing operation is reported as a failed check instead of
+/// aborting the run. A verifier that dies on the first problem hides every
+/// check after it, which is exactly how a whole upload path stayed broken while
+/// this suite reported 64 passes.
+Future<void> _checkSucceeds(String label, Future<void> Function() body) async {
+  try {
+    await body();
+    _check(label, true);
+  } on Object catch (error) {
+    _check(label, false, 'threw $error');
+  }
+}
+
 Future<void> main() async {
   stdout.writeln('Puter Cloud Storage — WebDAV transport contract checks\n');
 
@@ -243,6 +258,65 @@ Future<void> main() async {
         'upload reports the full byte count',
         lastProgress == 'uploaded payload'.length,
         'reported $lastProgress',
+      );
+
+      // --- upload into a folder that already exists
+      //
+      // This is the case every real upload hits, and it was the one missing
+      // here. The checks above only ever upload to the root (where there is no
+      // parent to create) or into a path whose parents do not exist yet — so a
+      // regression in parent handling leaves this whole suite green while every
+      // upload made by a user fails. The parent of an upload is *expected* to
+      // exist; that is not an error.
+      fixture.seedDirectory('/documents');
+      await _checkSucceeds(
+        'upload into an existing folder succeeds',
+        () => transport.upload(
+          UploadRequest(
+            localPath: source.path,
+            remotePath: '/documents/report.txt',
+          ),
+        ),
+      );
+      _check(
+        'an upload into an existing folder lands the content',
+        fixture.readAsString('/documents/report.txt') == 'uploaded payload',
+      );
+
+      fixture.seedDirectory('/documents/2026');
+      await _checkSucceeds(
+        'upload into a nested existing folder succeeds',
+        () => transport.upload(
+          UploadRequest(
+            localPath: source.path,
+            remotePath: '/documents/2026/summary.txt',
+          ),
+        ),
+      );
+      _check(
+        'an upload into a nested existing folder lands the content',
+        fixture.readAsString('/documents/2026/summary.txt') ==
+            'uploaded payload',
+      );
+
+      // --- and the collision case must still be refused, not swallowed
+      await _checkThrows(
+        'uploading a name that already exists is still refused',
+        PuterErrorKind.alreadyExists,
+        () => transport.upload(
+          UploadRequest(
+            localPath: source.path,
+            remotePath: '/documents/report.txt',
+          ),
+        ),
+      );
+
+      // --- "New folder" keeps strict semantics: a duplicate is a real error,
+      // not something to tolerate on the way to somewhere else.
+      await _checkThrows(
+        'creating a folder that already exists still reports alreadyExists',
+        PuterErrorKind.alreadyExists,
+        () => transport.createDirectory('/documents'),
       );
 
       // --- overwrite protection

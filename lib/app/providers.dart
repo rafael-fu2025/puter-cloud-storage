@@ -31,7 +31,6 @@ import '../data/repositories/settings_repository.dart';
 import '../data/transfer/transfer_engine.dart';
 import '../data/transfer/transfer_store.dart';
 import '../domain/entities/remote_node.dart';
-import '../domain/entities/remote_path.dart';
 import 'session.dart';
 
 /// Active configuration. Overridden at startup.
@@ -113,6 +112,7 @@ final transferEngineProvider = Provider<TransferEngine?>((ref) {
     repository: repository,
     store: ref.watch(transferStoreProvider),
     config: ref.watch(appConfigProvider),
+    deviceFiles: ref.watch(deviceFilesProvider),
   );
   unawaited(engine.restore());
 
@@ -134,9 +134,10 @@ final storageUsageProvider = FutureProvider<StorageUsage?>((ref) async {
   if (!repository.capabilities.canReportUsage) return null;
   try {
     return await repository.usage();
-  } on PuterException {
-    // The meter is informational. A transport that cannot report quota hides
-    // the bar rather than showing a wrong one.
+  } on Object {
+    // The meter is informational, so nothing a quota read does may break a
+    // screen. A transport that cannot report quota hides the meter rather than
+    // showing a wrong one or an error.
     return null;
   }
 });
@@ -159,5 +160,12 @@ final cacheSizeProvider = FutureProvider<int>((ref) async {
   return repository.cacheSize();
 });
 
-/// The folder the browser is showing.
-final currentPathProvider = StateProvider<String>((ref) => RemotePath.root);
+/// The shell's destinations.
+enum HomeTab { files, transfers, search, settings }
+
+/// Which tab is showing.
+///
+/// Declared here rather than in the shell widget so that a screen which needs
+/// to switch tabs does not have to import the shell — which imports every
+/// screen, and would make the dependency circular.
+final homeTabProvider = StateProvider<HomeTab>((ref) => HomeTab.files);

@@ -355,6 +355,31 @@ class WebDavTransport implements PuterTransport {
     }
   }
 
+  /// Make sure every collection in [path] exists, tolerating ones that already
+  /// do — **including the last segment**.
+  ///
+  /// Deliberately not [createDirectory]. That one implements "New folder", where
+  /// a duplicate is a real error the user needs to hear about. Here the caller
+  /// is about to write a file *into* `path`, so the final segment existing is
+  /// the normal, expected case rather than a conflict.
+  ///
+  /// This distinction is load-bearing: routing the upload's parent through
+  /// [createDirectory] made every upload into an existing folder throw
+  /// `alreadyExists` before a single byte was sent, while uploads to the root
+  /// kept working because they skip this step entirely.
+  Future<void> _ensureCollection(String path) async {
+    var current = '';
+    for (final segment in _segments(path)) {
+      current = '$current/$segment';
+      try {
+        await _mkcol(current);
+      } on PuterException catch (error) {
+        if (error.kind == PuterErrorKind.alreadyExists) continue;
+        rethrow;
+      }
+    }
+  }
+
   Future<void> _mkcol(String path) async {
     final response = await _send<Response<dynamic>>(
       RequestClass.mutation,
@@ -490,7 +515,9 @@ class WebDavTransport implements PuterTransport {
     if (request.createMissingParents) {
       final parent = _parentOf(request.remotePath);
       if (parent != null && parent.isNotEmpty) {
-        await createDirectory(parent);
+        // Tolerates the parent existing, which is the normal case — see
+        // [_ensureCollection] for why this is not [createDirectory].
+        await _ensureCollection(parent);
       }
     }
 
@@ -703,7 +730,20 @@ class WebDavTransport implements PuterTransport {
       );
     }
 
-    final document = XmlDocument.parse(_bodyOf(response));
+    final XmlDocument document;
+    try {
+      document = XmlDocument.parse(_bodyOf(response));
+    } on XmlException catch (error) {
+      // Wrapped rather than allowed to escape as a raw parse error. Only the
+      // upload path asks for quota, so a leaked XmlException here fails every
+      // upload while leaving downloads working — a confusing symptom that the
+      // error taxonomy exists to prevent.
+      throw PuterException(
+        PuterErrorKind.protocol,
+        'Could not read the storage details from Puter.',
+        cause: error,
+      );
+    }
     final available = _numeric(document, 'quota-available-bytes');
     final used = _numeric(document, 'quota-used-bytes');
 

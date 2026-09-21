@@ -33,6 +33,13 @@ class FakeTransport implements PuterTransport {
   final PuterIdentity identityResult;
   StorageUsage? usageResult;
 
+  /// Thrown by [usage] when set, taking precedence over [usageResult].
+  ///
+  /// Exists to model a failure that is **not** a [PuterException] — a transport
+  /// leaking a raw parse error, say. Quota is advisory, so nothing a quota read
+  /// does may be allowed to fail a transfer.
+  Object? usageError;
+
   // ------------------------------------------------------------ observations
 
   /// Paths passed to [list], in order. Lets a test assert the request budget
@@ -239,6 +246,9 @@ class FakeTransport implements PuterTransport {
 
   @override
   Future<StorageUsage> usage() async {
+    final failure = usageError;
+    if (failure != null) throw failure;
+
     final result = usageResult;
     if (result == null) {
       throw const PuterException(

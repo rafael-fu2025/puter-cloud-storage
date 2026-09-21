@@ -25,6 +25,7 @@ import 'package:puter_cloud_storage/core/security/token_vault.dart';
 import 'package:puter_cloud_storage/data/database/app_database.dart';
 import 'package:puter_cloud_storage/data/database/node_cache.dart';
 import 'package:puter_cloud_storage/data/platform/device_files.dart';
+import 'package:puter_cloud_storage/data/platform/platform_bridge.dart';
 import 'package:puter_cloud_storage/data/repositories/settings_repository.dart';
 import 'package:puter_cloud_storage/data/transfer/transfer_store.dart';
 import 'package:puter_cloud_storage/domain/entities/remote_node.dart';
@@ -41,51 +42,73 @@ void main() {
   // "multiple databases" warning is silenced here rather than worked around.
   driftRuntimeOptions.dontWarnAboutMultipleDatabases = true;
 
-  /// A scrollable to drive, chosen explicitly.
+  /// Wait until [finder] matches, tolerating slow platform calls.
   ///
-  /// `scrollUntilVisible` defaults to `find.byType(Scrollable)` and calls
-  /// `.single` on it, which throws as soon as a screen has more than one — and
-  /// the welcome screen has two, because `SelectableText` brings its own.
-  Finder firstScrollable() => find.byType(Scrollable).first;
+  /// `pumpAndSettle` waits for *frames*, and the first frame here is a spinner.
+  /// The welcome screen does not exist until a Keystore read resolves, which on
+  /// a cold start after a fresh install can take seconds — so settling on
+  /// frames alone returns too early and the test fails intermittently. This
+  /// waits on the condition instead.
+  Future<void> waitFor(
+    WidgetTester tester,
+    Finder finder, {
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final DateTime deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await tester.pump(const Duration(milliseconds: 100));
+      if (finder.evaluate().isNotEmpty) {
+        await tester.pumpAndSettle();
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    fail('Timed out waiting for $finder');
+  }
+
+  /// Give the test a viewport tall enough for the whole welcome screen.
+  ///
+  /// Scrolling to a widget on a cold start is timing-dependent — the first
+  /// frame after a fresh install can take long enough that the list has not
+  /// laid out when the drag begins, which made this suite flaky. A temporary
+  /// taller viewport removes the scroll, and with it the flakiness, while
+  /// leaving the real device size for every other test.
+  void useTallViewport(WidgetTester tester) {
+    tester.view.physicalSize = const Size(1200, 3600);
+    tester.view.devicePixelRatio = 3.0;
+    addTearDown(tester.view.reset);
+  }
 
   /// The real app, on the real device, with every real dependency.
-  testWidgets('the app launches and reaches the token screen', (
+  testWidgets('the app launches and reaches the access key screen', (
     WidgetTester tester,
   ) async {
+    useTallViewport(tester);
     await app.main();
-    await tester.pumpAndSettle();
+    await waitFor(tester, find.text('Your files, on Puter'));
 
     expect(
-      find.text('Connect your Puter account'),
+      find.text('Your files, on Puter'),
       findsOneWidget,
       reason: 'the welcome screen must render with the real plugin set',
     );
 
-    await tester.scrollUntilVisible(
-      find.text('Enter token'),
-      200,
-      scrollable: firstScrollable(),
-    );
-    await tester.tap(find.text('Enter token'));
-    await tester.pumpAndSettle();
+    await tester.tap(find.text('Add my access key'));
+    await waitFor(tester, find.text('Paste your access key'));
 
-    expect(find.text('Paste your Puter auth token'), findsOneWidget);
+    expect(find.text('Paste your access key'), findsOneWidget);
   });
 
-  testWidgets('the token field validates before spending an attempt', (
+  testWidgets('the key field validates before spending an attempt', (
     WidgetTester tester,
   ) async {
+    useTallViewport(tester);
     await app.main();
-    await tester.pumpAndSettle();
-    await tester.scrollUntilVisible(
-      find.text('Enter token'),
-      200,
-      scrollable: firstScrollable(),
-    );
-    await tester.tap(find.text('Enter token'));
+    await waitFor(tester, find.text('Add my access key'));
+    await tester.tap(find.text('Add my access key'));
     await tester.pumpAndSettle();
 
-    // A token that cannot possibly be one must be refused locally. Reaching the
+    // A key that cannot possibly be one must be refused locally. Reaching the
     // network here would spend failed-sign-in budget on an obvious typo, and
     // ten of those lock the account out of WebDAV for fifteen minutes.
     await tester.enterText(find.byType(TextFormField), 'x');
@@ -93,7 +116,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('too short'), findsOneWidget);
-    expect(find.text('Paste your Puter auth token'), findsOneWidget);
+    expect(find.text('Paste your access key'), findsOneWidget);
   });
 
   testWidgets('the Keystore-backed vault round-trips a credential', (
@@ -259,6 +282,45 @@ void main() {
     if (directory.listSync().isEmpty) {
       directory.deleteSync();
     }
+  });
+
+  testWidgets('the URL opener refuses anything that is not http(s)', (
+    WidgetTester tester,
+  ) async {
+    // This is reachable from strings that came off the network, so a remote
+    // value must not be able to launch another app's deep link.
+    expect(await PlatformBridge.openUrl(''), isFalse);
+    expect(await PlatformBridge.openUrl('file:///etc/passwd'), isFalse);
+    expect(await PlatformBridge.openUrl('javascript:alert(1)'), isFalse);
+    expect(
+      await PlatformBridge.openUrl('content://com.other/secret'),
+      isFalse,
+    );
+  });
+
+  testWidgets('the staging cleaner refuses paths outside its own area', (
+    WidgetTester tester,
+  ) async {
+    final files = PlatformDeviceFiles();
+
+    // Whatever the channel is handed, it must not delete outside the directory
+    // the app stages uploads in. A deletion helper that trusts its argument is
+    // one bug away from removing a file the user cares about.
+    final Directory downloads = await files.downloadDirectory();
+    final File bystander = File('${downloads.path}/do-not-delete.txt')
+      ..writeAsStringSync('still here');
+
+    expect(await files.discardStagedUpload(bystander.path), isFalse);
+    expect(
+      bystander.existsSync(),
+      isTrue,
+      reason: 'a path outside the staging area must be left alone',
+    );
+    bystander.deleteSync();
+
+    // And an unrelated absolute path is refused too.
+    expect(await files.discardStagedUpload('/data/local/tmp/x.txt'), isFalse);
+    expect(await files.discardStagedUpload(''), isFalse);
   });
 
   testWidgets('the app-specific download directory is writable', (

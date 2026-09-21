@@ -1,41 +1,157 @@
-/// Every operation the browser can perform on a node, and the dialogs that
-/// collect what each one needs.
+/// Every operation the browser performs on a node, and the sheets that collect
+/// what each one needs.
 ///
 /// Kept out of the screen widget for one reason that matters: **every mutation
-/// here reports its own outcome**. A rename that fails because the name is
-/// taken, a delete refused for permissions, an upload blocked by quota — each
-/// surfaces as a message the user can act on, next to the thing they asked for.
-/// A silent failure in a storage app is indistinguishable from data loss.
+/// reports its own outcome**. A rename that fails because the name is taken, a
+/// delete refused for permissions, an upload blocked because the account is
+/// full — each surfaces as a message the user can act on. A silent failure in a
+/// storage app is indistinguishable from data loss.
+///
+/// Two structural rules, both fixing things the previous version got wrong:
+///
+/// * **Destructive actions are separated.** Delete used to sit directly beneath
+///   Download and Details in a list of equally weighted rows, one stray tap
+///   from irreversibly removing a folder.
+/// * **Primary actions are labelled.** Every row says what it does, rather than
+///   putting the verb in a menu the user has to open to read.
 library;
+
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
 
-import '../../app/home_shell.dart';
 import '../../app/providers.dart';
 import '../../core/error/error_presenter.dart';
 import '../../core/error/puter_exception.dart';
 import '../../core/format/file_kinds.dart';
 import '../../core/format/formatters.dart';
+import '../../core/ui/components.dart';
+import '../../core/ui/design.dart';
+import '../../data/platform/device_files.dart';
 import '../../data/repositories/file_repository.dart';
+import '../../data/transfer/transfer_engine.dart';
 import '../../domain/entities/remote_node.dart';
 import '../../domain/entities/remote_path.dart';
 import 'browser_providers.dart';
 
 /// Operations the browser offers on files and folders.
 abstract final class FileActions {
+  // --------------------------------------------------------------- the sheet
+
+  /// Everything that can be done with [node], in one sheet.
+  ///
+  /// Ordering is deliberate: the thing you most often want first, metadata
+  /// next, destructive last and behind a divider. A folder's primary action is
+  /// to open it — tapping the row already does that, so the sheet leads with
+  /// the operations that a row tap cannot express.
+  static Future<void> showActions(
+    BuildContext context,
+    WidgetRef ref,
+    RemoteNode node,
+  ) async {
+    final FileRepository? repository = ref.read(fileRepositoryProvider);
+    if (repository == null) {
+      _report(context, 'Not connected to Puter.');
+      return;
+    }
+
+    final FileCategory category =
+        FileKinds.of(node.name, isDirectory: node.isDirectory);
+    final bool canWrite = repository.capabilities.canWrite;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (BuildContext sheetContext) => AppSheet(
+        title: node.name,
+        subtitle: node.isDirectory
+            ? 'Folder · ${DateFormatting.relative(node.modifiedAt)}'
+            : '${ByteFormat.format(node.sizeBytes)} · '
+                '${DateFormatting.relative(node.modifiedAt)}',
+        leading: Icon(
+          FileKinds.iconFor(category),
+          size: 30,
+          color: FileKinds.tintFor(
+            category,
+            Theme.of(sheetContext).colorScheme,
+          ),
+        ),
+        children: <Widget>[
+          if (!node.isDirectory)
+            AppListRow(
+              leading: const Icon(Icons.download_rounded),
+              title: const Text('Download to this phone'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                download(context, ref, node);
+              },
+            ),
+          if (canWrite)
+            AppListRow(
+              leading: const Icon(Icons.drive_file_rename_outline_rounded),
+              title: const Text('Rename'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                rename(context, ref, node);
+              },
+            ),
+          if (canWrite)
+            AppListRow(
+              leading: const Icon(Icons.drive_file_move_outlined),
+              title: const Text('Move to another folder'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                move(context, ref, node);
+              },
+            ),
+          if (canWrite)
+            AppListRow(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('Make a copy'),
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                copy(context, ref, node);
+              },
+            ),
+          AppListRow(
+            leading: const Icon(Icons.info_outline_rounded),
+            title: const Text('Details'),
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              showDetails(context, ref, node);
+            },
+          ),
+          if (canWrite) ...<Widget>[
+            // Separated, and coloured. Everything above is reversible; this is
+            // not, so it does not sit in the same visual group as the rest.
+            const AppDivider(),
+            AppListRow(
+              leading: const Icon(Icons.delete_outline_rounded),
+              title: const Text('Delete'),
+              subtitle: const Text('This cannot be undone'),
+              isDestructive: true,
+              onTap: () {
+                Navigator.of(sheetContext).pop();
+                delete(context, ref, node);
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
   // ------------------------------------------------------------- create folder
 
-  /// Ask for a name and create the folder.
   static Future<void> createFolder(BuildContext context, WidgetRef ref) async {
-    final parent = ref.read(browserPathProvider);
-    final name = await showDialog<String>(
+    final String parent = ref.read(browserPathProvider);
+    final String? name = await showDialog<String>(
       context: context,
       builder: (BuildContext dialogContext) => const _NameDialog(
         title: 'New folder',
         label: 'Folder name',
-        initialValue: 'Untitled folder',
+        initialValue: 'New folder',
         confirmLabel: 'Create',
       ),
     );
@@ -57,7 +173,7 @@ abstract final class FileActions {
     WidgetRef ref,
     RemoteNode node,
   ) async {
-    final name = await showDialog<String>(
+    final String? name = await showDialog<String>(
       context: context,
       builder: (BuildContext dialogContext) => _NameDialog(
         title: 'Rename',
@@ -83,25 +199,30 @@ abstract final class FileActions {
     WidgetRef ref,
     RemoteNode node,
   ) async {
-    final confirmed = await showDialog<bool>(
+    final bool? confirmed = await showDialog<bool>(
       context: context,
       builder: (BuildContext dialogContext) => AlertDialog(
+        icon: Icon(
+          Icons.delete_outline_rounded,
+          color: Theme.of(dialogContext).colorScheme.error,
+        ),
         title: Text('Delete “${node.name}”?'),
         content: Text(
           node.isDirectory
-              ? 'The folder and everything inside it will be deleted from your '
-                  'Puter account. This cannot be undone.'
-              : 'This file will be deleted from your Puter account. This '
-                  'cannot be undone.',
+              ? 'The folder and everything inside it will be permanently '
+                  'removed from your Puter account.'
+              : 'This file will be permanently removed from your Puter '
+                  'account.',
         ),
         actions: <Widget>[
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
+            child: const Text('Keep it'),
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.error,
+              backgroundColor: Theme.of(dialogContext).colorScheme.error,
+              foregroundColor: Theme.of(dialogContext).colorScheme.onError,
             ),
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: const Text('Delete'),
@@ -141,29 +262,29 @@ abstract final class FileActions {
     RemoteNode node, {
     required bool isCopy,
   }) async {
-    final start = RemotePath.parent(node.path) ?? RemotePath.root;
-    final destination = await showDialog<String>(
+    final String start = RemotePath.parent(node.path) ?? RemotePath.root;
+    final String? destination = await showDialog<String>(
       context: context,
       builder: (BuildContext dialogContext) => _FolderPickerDialog(
-        title: isCopy ? 'Copy “${node.name}” to' : 'Move “${node.name}” to',
+        title: isCopy ? 'Copy “${node.name}” into…' : 'Move “${node.name}” into…',
         startPath: start,
-        // Moving a folder into itself would be refused by the server or, worse,
-        // executed destructively. Excluding the subtree from the picker makes
-        // the mistake impossible rather than merely rejected.
+        // Moving a folder inside itself would be refused by the server or,
+        // worse, executed destructively. Excluding the subtree from the picker
+        // makes the mistake impossible rather than merely rejected.
         excludeSubtreeOf: isCopy || !node.isDirectory ? null : node.path,
       ),
     );
     if (destination == null || !context.mounted) return;
 
-    final target = RemotePath.join(destination, node.name);
+    final String target = RemotePath.join(destination, node.name);
     if (target == node.path) return;
 
     await _run(
       context,
       ref,
       success: isCopy
-          ? 'Copied to ${_displayPath(destination)}.'
-          : 'Moved to ${_displayPath(destination)}.',
+          ? 'Copied into ${_displayPath(destination)}.'
+          : 'Moved into ${_displayPath(destination)}.',
       action: (FileRepository repository) => isCopy
           ? repository.copy(node, target)
           : repository.move(node, target),
@@ -177,13 +298,12 @@ abstract final class FileActions {
     WidgetRef ref,
     RemoteNode node,
   ) async {
-    final repository = ref.read(fileRepositoryProvider);
+    final FileRepository? repository = ref.read(fileRepositoryProvider);
     RemoteNode shown = node;
 
-    // A cached row can be days old. Refresh it first so the dialog does not
-    // report a stale size as fact — and if that fails, say so in the dialog
-    // rather than quietly showing old numbers.
-    var isStale = false;
+    // A cached row can be days old. Refresh before reporting, and if that
+    // fails say so in the dialog rather than presenting stale numbers as fact.
+    bool isStale = false;
     if (repository != null) {
       try {
         shown = await repository.stat(node.path);
@@ -193,10 +313,10 @@ abstract final class FileActions {
     }
     if (!context.mounted) return;
 
-    await showDialog<void>(
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (BuildContext dialogContext) =>
-          _DetailsDialog(node: shown, isStale: isStale),
+      builder: (BuildContext sheetContext) =>
+          _DetailsSheet(node: shown, isStale: isStale),
     );
   }
 
@@ -208,19 +328,18 @@ abstract final class FileActions {
     WidgetRef ref, {
     String? intoPath,
   }) async {
-    final files = ref.read(deviceFilesProvider);
     final String target = intoPath ?? ref.read(browserPathProvider);
-
-    final picked = await files.pickFiles();
-    if (picked.isEmpty || !context.mounted) return;
-
-    final engine = ref.read(transferEngineProvider);
+    final TransferEngine? engine = ref.read(transferEngineProvider);
     if (engine == null) {
       _report(context, 'Not connected to Puter.');
       return;
     }
 
-    for (final file in picked) {
+    final List<PickedFile> picked =
+        await ref.read(deviceFilesProvider).pickFiles();
+    if (picked.isEmpty || !context.mounted) return;
+
+    for (final PickedFile file in picked) {
       await engine.enqueueUpload(
         localPath: file.path,
         remotePath: RemotePath.join(target, file.name),
@@ -236,7 +355,8 @@ abstract final class FileActions {
           : 'Uploading ${picked.length} files.',
       action: SnackBarAction(
         label: 'View',
-        onPressed: () => _goToTransfers(ref),
+        onPressed: () =>
+            ref.read(homeTabProvider.notifier).state = HomeTab.transfers,
       ),
     );
   }
@@ -249,19 +369,19 @@ abstract final class FileActions {
     WidgetRef ref,
     RemoteNode node,
   ) async {
-    final engine = ref.read(transferEngineProvider);
+    final TransferEngine? engine = ref.read(transferEngineProvider);
     if (engine == null) {
       _report(context, 'Not connected to Puter.');
       return;
     }
 
-    final directory = await ref.read(deviceFilesProvider).downloadDirectory();
+    final Directory directory =
+        await ref.read(deviceFilesProvider).downloadDirectory();
     if (!context.mounted) return;
 
-    final localPath = p.join(directory.path, node.name);
     await engine.enqueueDownload(
       remotePath: node.path,
-      localPath: localPath,
+      localPath: p.join(directory.path, node.name),
       sizeBytes: node.sizeBytes,
     );
 
@@ -271,21 +391,21 @@ abstract final class FileActions {
       'Downloading “${node.name}”.',
       action: SnackBarAction(
         label: 'View',
-        onPressed: () => _goToTransfers(ref),
+        onPressed: () =>
+            ref.read(homeTabProvider.notifier).state = HomeTab.transfers,
       ),
     );
   }
 
   // ------------------------------------------------------------------ plumbing
 
-  /// Run one repository mutation, reporting success or failure.
   static Future<void> _run(
     BuildContext context,
     WidgetRef ref, {
     required String success,
     required Future<void> Function(FileRepository repository) action,
   }) async {
-    final repository = ref.read(fileRepositoryProvider);
+    final FileRepository? repository = ref.read(fileRepositoryProvider);
     if (repository == null) {
       _report(context, 'Not connected to Puter.');
       return;
@@ -296,7 +416,7 @@ abstract final class FileActions {
       if (context.mounted) _snack(context, success);
     } on PuterException catch (error) {
       if (!context.mounted) return;
-      final presentation = ErrorPresenter.describe(error);
+      final ErrorPresentation presentation = ErrorPresenter.describe(error);
       _snack(
         context,
         '${presentation.title}. ${presentation.message}',
@@ -304,7 +424,7 @@ abstract final class FileActions {
       );
     } on Object catch (error) {
       if (!context.mounted) return;
-      _snack(context, 'Something went wrong: $error', isError: true);
+      _snack(context, 'That did not work. $error', isError: true);
     }
   }
 
@@ -317,7 +437,7 @@ abstract final class FileActions {
     bool isError = false,
     SnackBarAction? action,
   }) {
-    final messenger = ScaffoldMessenger.maybeOf(context);
+    final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(context);
     if (messenger == null) return;
     messenger
       ..hideCurrentSnackBar()
@@ -325,18 +445,16 @@ abstract final class FileActions {
         SnackBar(
           content: Text(message),
           action: action,
-          backgroundColor:
-              isError ? Theme.of(context).colorScheme.errorContainer : null,
+          backgroundColor: isError
+              ? Theme.of(context).colorScheme.errorContainer
+              : null,
           duration: Duration(seconds: isError ? 6 : 3),
         ),
       );
   }
 
-  static void _goToTransfers(WidgetRef ref) =>
-      ref.read(homeTabProvider.notifier).state = HomeTab.transfers;
-
   static String _displayPath(String path) =>
-      path == RemotePath.root ? 'Home' : RemotePath.name(path);
+      path == RemotePath.root ? 'your top-level folder' : RemotePath.name(path);
 }
 
 /// A single-line text prompt, used for creating and renaming.
@@ -395,13 +513,10 @@ class _NameDialogState extends State<_NameDialog> {
           autofocus: true,
           textInputAction: TextInputAction.done,
           onFieldSubmitted: (_) => _submit(),
-          decoration: InputDecoration(
-            labelText: widget.label,
-            border: const OutlineInputBorder(),
-          ),
+          decoration: InputDecoration(labelText: widget.label),
           validator: (String? value) {
-            final text = value?.trim() ?? '';
-            if (text.isEmpty) return 'A name is required.';
+            final String text = value?.trim() ?? '';
+            if (text.isEmpty) return 'Give it a name.';
             if (text.contains('/')) return 'A name cannot contain “/”.';
             if (text == '.' || text == '..') return 'That name is reserved.';
             return null;
@@ -444,34 +559,37 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final listing = ref.watch(directoryListingProvider(_path));
+    final AsyncValue<DirectoryListing> listing =
+        ref.watch(directoryListingProvider(_path));
 
-    final excluded = widget.excludeSubtreeOf;
-    final cannotConfirm =
+    final String? excluded = widget.excludeSubtreeOf;
+    final bool cannotConfirm =
         excluded != null && RemotePath.isWithin(excluded, _path);
 
     return AlertDialog(
       title: Text(widget.title),
-      contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
+      contentPadding: const EdgeInsets.fromLTRB(0, AppSpacing.md, 0, 0),
       content: SizedBox(
         width: double.maxFinite,
-        height: 400,
+        // Sized against the viewport rather than a fixed 400dp, which is what
+        // used to overflow on a short screen or with the keyboard open.
+        height: MediaQuery.sizeOf(context).height * 0.5,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xl),
               child: Row(
                 children: <Widget>[
                   Icon(
-                    Icons.folder_open,
+                    Icons.folder_open_rounded,
                     size: 18,
                     color: theme.colorScheme.primary,
                   ),
-                  const SizedBox(width: 8),
+                  const SizedBox(width: AppSpacing.sm),
                   Expanded(
                     child: Text(
-                      _path == RemotePath.root ? 'Home' : _path,
+                      _path == RemotePath.root ? 'Puter' : _path,
                       style: theme.textTheme.bodyMedium,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -479,13 +597,13 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
                 ],
               ),
             ),
-            const Divider(height: 20),
+            const SizedBox(height: AppSpacing.md),
             Expanded(
               child: listing.when(
-                loading: () => const Center(child: CircularProgressIndicator()),
+                loading: () => const LoadingState(),
                 error: (Object error, StackTrace _) => Center(
                   child: Padding(
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.all(AppSpacing.lg),
                     child: Text(
                       ErrorPresenter.describe(error).message,
                       textAlign: TextAlign.center,
@@ -494,14 +612,14 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
                   ),
                 ),
                 data: (DirectoryListing value) {
-                  final folders = value.items
+                  final List<RemoteNode> folders = value.items
                       .where((RemoteNode node) => node.isDirectory)
                       .toList(growable: false);
 
                   if (folders.isEmpty) {
                     return Center(
                       child: Text(
-                        'No folders here.',
+                        'No folders inside this one.',
                         style: theme.textTheme.bodyMedium?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                         ),
@@ -512,20 +630,21 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
                   return ListView.builder(
                     itemCount: folders.length,
                     itemBuilder: (BuildContext context, int index) {
-                      final folder = folders[index];
-                      final isExcluded = excluded != null &&
+                      final RemoteNode folder = folders[index];
+                      final bool isExcluded = excluded != null &&
                           RemotePath.isWithin(excluded, folder.path);
-                      return ListTile(
+                      return AppListRow(
+                        dense: true,
                         leading: Icon(
-                          Icons.folder_outlined,
-                          color: isExcluded
-                              ? theme.disabledColor
-                              : theme.colorScheme.primary,
+                          isExcluded
+                              ? Icons.block_rounded
+                              : Icons.folder_outlined,
                         ),
                         title: Text(folder.name),
-                        enabled: !isExcluded,
                         subtitle: isExcluded ? const Text('Cannot move here') : null,
-                        onTap: () => setState(() => _path = folder.path),
+                        onTap: isExcluded
+                            ? null
+                            : () => setState(() => _path = folder.path),
                       );
                     },
                   );
@@ -534,14 +653,15 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
             ),
             if (_path != RemotePath.root)
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
                 child: Align(
                   alignment: Alignment.centerLeft,
                   child: TextButton.icon(
                     onPressed: () => setState(
-                      () => _path = RemotePath.parent(_path) ?? RemotePath.root,
+                      () =>
+                          _path = RemotePath.parent(_path) ?? RemotePath.root,
                     ),
-                    icon: const Icon(Icons.arrow_upward, size: 18),
+                    icon: const Icon(Icons.arrow_upward_rounded, size: 18),
                     label: const Text('Up one level'),
                   ),
                 ),
@@ -555,19 +675,18 @@ class _FolderPickerDialogState extends ConsumerState<_FolderPickerDialog> {
           child: const Text('Cancel'),
         ),
         FilledButton(
-          onPressed: cannotConfirm
-              ? null
-              : () => Navigator.of(context).pop(_path),
-          child: Text(cannotConfirm ? 'Cannot use this folder' : 'Choose'),
+          onPressed:
+              cannotConfirm ? null : () => Navigator.of(context).pop(_path),
+          child: Text(cannotConfirm ? 'Cannot use this folder' : 'Move here'),
         ),
       ],
     );
   }
 }
 
-/// Everything known about one node.
-class _DetailsDialog extends StatelessWidget {
-  const _DetailsDialog({required this.node, required this.isStale});
+/// Everything known about one node, in plain language.
+class _DetailsSheet extends StatelessWidget {
+  const _DetailsSheet({required this.node, required this.isStale});
 
   final RemoteNode node;
   final bool isStale;
@@ -575,94 +694,118 @@ class _DetailsDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final category = FileKinds.of(node.name, isDirectory: node.isDirectory);
+    final FileCategory category =
+        FileKinds.of(node.name, isDirectory: node.isDirectory);
 
-    return AlertDialog(
-      title: Row(
-        children: <Widget>[
-          Icon(
-            FileKinds.iconFor(category),
-            color: FileKinds.tintFor(category, theme.colorScheme),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(node.name, overflow: TextOverflow.ellipsis),
-          ),
-        ],
+    return AppSheet(
+      title: node.name,
+      subtitle: FileKinds.describeCategory(
+        node.name,
+        isDirectory: node.isDirectory,
       ),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          if (isStale)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Row(
-                children: <Widget>[
-                  Icon(
-                    Icons.cloud_off,
-                    size: 16,
-                    color: theme.colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      'Showing cached details — the server could not be reached.',
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        color: theme.colorScheme.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          _Row(label: 'Path', value: node.path),
-          if (!node.isDirectory)
-            _Row(label: 'Size', value: ByteFormat.format(node.sizeBytes)),
-          _Row(
-            label: 'Modified',
-            value: DateFormatting.absolute(node.modifiedAt),
-          ),
-          if (node.mimeType != null)
-            _Row(label: 'Type', value: node.mimeType!),
-          if (node.isShared != null)
-            _Row(
-              label: 'Sharing',
-              value: node.isShared! ? 'Shared by you' : 'Not shared',
-            ),
-          if (node.indexedAt != null)
-            _Row(
-              label: 'Last checked',
-              value: DateFormatting.relative(node.indexedAt),
-            ),
-        ],
+      leading: Icon(
+        FileKinds.iconFor(category),
+        size: 30,
+        color: FileKinds.tintFor(category, theme.colorScheme),
       ),
-      actions: <Widget>[
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Close'),
+      children: <Widget>[
+        if (isStale)
+          const Padding(
+            padding: EdgeInsets.only(bottom: AppSpacing.sm),
+            child: InlineBanner(
+              tone: BannerTone.info,
+              icon: Icons.cloud_off_rounded,
+              message: 'Showing saved details — Puter could not be reached to '
+                  'confirm them.',
+            ),
+          ),
+        _DetailRow(
+          label: 'Location',
+          value: RemotePath.parent(node.path) ?? RemotePath.root,
+          copyable: true,
         ),
+        if (!node.isDirectory)
+          _DetailRow(
+            label: 'Size',
+            value: ByteFormat.format(node.sizeBytes),
+          ),
+        _DetailRow(
+          label: 'Type',
+          value: FileKinds.describeCategory(
+            node.name,
+            isDirectory: node.isDirectory,
+          ),
+        ),
+        _DetailRow(
+          label: 'Last changed',
+          value: DateFormatting.absolute(node.modifiedAt),
+        ),
+        if (node.isShared != null)
+          _DetailRow(
+            label: 'Sharing',
+            value: node.isShared! ? 'Shared by you' : 'Private',
+          ),
+        if (node.indexedAt != null)
+          _DetailRow(
+            label: 'Saved on this phone',
+            value: DateFormatting.relative(node.indexedAt),
+          ),
       ],
     );
   }
 }
 
-class _Row extends StatelessWidget {
-  const _Row({required this.label, required this.value});
+/// One labelled fact, selectable so it can be copied.
+class _DetailRow extends StatelessWidget {
+  const _DetailRow({
+    required this.label,
+    required this.value,
+    this.copyable = false,
+  });
 
   final String label;
   final String value;
+  final bool copyable;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+
+    final Widget content = Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (copyable) ...<Widget>[
+          Icon(
+            Icons.copy_rounded,
+            size: 15,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(
+            child: SelectableText(
+              value,
+              style: theme.textTheme.bodyMedium,
+            ),
+          ),
+        ] else
+          Expanded(
+            child: Text(value, style: theme.textTheme.bodyMedium),
+          ),
+      ],
+    );
+
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.xl,
+        AppSpacing.sm,
+        AppSpacing.xl,
+        AppSpacing.sm,
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
           SizedBox(
-            width: 96,
+            width: 132,
             child: Text(
               label,
               style: theme.textTheme.bodySmall?.copyWith(
@@ -671,7 +814,12 @@ class _Row extends StatelessWidget {
             ),
           ),
           Expanded(
-            child: SelectableText(value, style: theme.textTheme.bodyMedium),
+            child: copyable
+                ? content
+                : Padding(
+                    padding: const EdgeInsets.only(left: 22),
+                    child: content,
+                  ),
           ),
         ],
       ),

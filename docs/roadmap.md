@@ -12,15 +12,19 @@ Sequenced so that **the project's riskiest assumptions are tested before any fea
 |---|---|
 | 0 — Feasibility spike | Tooling written; **the eight questions still need a live token** |
 | 1 — Foundation | **Implemented.** Transport, scheduler, vault, domain, error taxonomy, index |
-| 2 — Browse | **Implemented.** Onboarding, listing, breadcrumbs, sorting, folder operations, storage meter |
+| 2 — Browse | **Implemented.** Onboarding, listing, jump-to-folder, sorting, folder operations |
 | 3 — Transfers | **Implemented.** Per-file queue, resume, cancel/pause/retry, quota pre-flight |
-| 4 — Search and MVP | **Implemented.** Index search, settings, diagnostics, theming, attribution |
+| 4 — Search and MVP | **Implemented.** Device search, settings, theming, attribution, plain-language pass |
 | 5 — v1 | Not started |
 | 6 — v2 | Not started |
 
 Two Phase 3 exit criteria are **not** met, and the code says so rather than claiming otherwise:
 resumable *upload* (`Content-Range` on `PUT` is unverified, so `canResumeUpload` stays `false`), and
 WorkManager-backed background transfers with a foreground notification. Both wait on Phase 0.
+
+Phase 4's diagnostics screen was rewritten and moved behind seven taps on the version row. It was a
+primary Settings entry that rendered raw `TransportCapabilities` output and cited internal design
+documents by number, which is a developer's console rather than a user's screen.
 
 Phase 0 remains the gate it always was. Nothing here proves the backend works, and the quota
 question — 100 MiB or 310 GB — still decides whether the product is viable. It needs a real token.

@@ -7,6 +7,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../ui/design.dart';
+
 /// Broad category a file belongs to, for icon and colour selection.
 enum FileCategory {
   folder,
@@ -120,43 +122,63 @@ abstract final class FileKinds {
   }
 
   /// The icon shown for [category].
+  ///
+  /// One family — `_rounded` throughout — at a consistent weight. The previous
+  /// mapping mixed filled and outlined glyphs in the same list, so adjacent
+  /// rows had visibly different optical weight.
   static IconData iconFor(FileCategory category) => switch (category) {
         FileCategory.folder => Icons.folder_rounded,
-        FileCategory.image => Icons.image_outlined,
-        FileCategory.video => Icons.movie_outlined,
-        FileCategory.audio => Icons.audiotrack_outlined,
-        FileCategory.document => Icons.description_outlined,
-        FileCategory.spreadsheet => Icons.table_chart_outlined,
-        FileCategory.presentation => Icons.slideshow_outlined,
-        FileCategory.archive => Icons.folder_zip_outlined,
-        FileCategory.code => Icons.code,
-        FileCategory.text => Icons.article_outlined,
-        FileCategory.pdf => Icons.picture_as_pdf_outlined,
-        FileCategory.apk => Icons.android,
-        FileCategory.font => Icons.text_fields,
-        FileCategory.unknown => Icons.insert_drive_file_outlined,
+        FileCategory.image => Icons.image_rounded,
+        FileCategory.video => Icons.movie_rounded,
+        FileCategory.audio => Icons.audiotrack_rounded,
+        FileCategory.document => Icons.description_rounded,
+        FileCategory.spreadsheet => Icons.table_chart_rounded,
+        FileCategory.presentation => Icons.slideshow_rounded,
+        FileCategory.archive => Icons.folder_zip_rounded,
+        FileCategory.code => Icons.code_rounded,
+        FileCategory.text => Icons.article_rounded,
+        FileCategory.pdf => Icons.picture_as_pdf_rounded,
+        FileCategory.apk => Icons.android_rounded,
+        FileCategory.font => Icons.text_fields_rounded,
+        FileCategory.unknown => Icons.insert_drive_file_rounded,
       };
 
   /// Convenience for the common case.
   static IconData iconForName(String name, {bool isDirectory = false}) =>
       iconFor(of(name, isDirectory: isDirectory));
 
-  /// A tint per category.
+  /// A tint per category, from the design language's own palette.
   ///
-  /// Derived from [ColorScheme] rather than hard-coded hues so the palette
-  /// stays legible in both light and dark themes — a fixed amber on a dark
-  /// surface is the usual way this goes wrong.
-  static Color tintFor(FileCategory category, ColorScheme scheme) =>
-      switch (category) {
-        FileCategory.folder => scheme.primary,
-        FileCategory.image => scheme.tertiary,
-        FileCategory.video => scheme.secondary,
-        FileCategory.audio => scheme.secondary,
-        FileCategory.pdf => scheme.error,
-        FileCategory.archive => scheme.tertiary,
-        FileCategory.apk => scheme.primary,
-        _ => scheme.onSurfaceVariant,
-      };
+  /// Each family gets its own hue so a spreadsheet, a slide deck and a source
+  /// file are distinguishable at a glance. Two things this deliberately does
+  /// not do, both of which the previous version got wrong:
+  ///
+  /// * **PDFs are not error-red.** Red means something is broken and needs the
+  ///   user. A PDF is a normal document.
+  /// * **Documents do not all collapse to one grey.** That made four different
+  ///   file types visually identical.
+  ///
+  /// [AppColors.adapt] lightens each hue for dark surfaces, where the light-mode
+  /// values would otherwise lose contrast.
+  static Color tintFor(FileCategory category, ColorScheme scheme) {
+    final Color base = switch (category) {
+      FileCategory.folder => AppColors.folder,
+      FileCategory.image => AppColors.image,
+      FileCategory.video => AppColors.video,
+      FileCategory.audio => AppColors.audio,
+      FileCategory.document => AppColors.document,
+      FileCategory.spreadsheet => AppColors.spreadsheet,
+      FileCategory.presentation => AppColors.presentation,
+      FileCategory.pdf => AppColors.pdf,
+      FileCategory.archive => AppColors.archive,
+      FileCategory.code => AppColors.code,
+      FileCategory.text => AppColors.text,
+      FileCategory.apk => AppColors.apk,
+      FileCategory.font => AppColors.font,
+      FileCategory.unknown => AppColors.unknown,
+    };
+    return AppColors.adapt(base, scheme.brightness);
+  }
 
   /// Whether [name] is something the browser can render a thumbnail for.
   ///
@@ -169,5 +191,47 @@ abstract final class FileKinds {
     final dot = name.lastIndexOf('.');
     if (dot <= 0 || dot == name.length - 1) return false;
     return raster.contains(name.substring(dot + 1).toLowerCase());
+  }
+
+  /// A plain-language description of what a file is.
+  ///
+  /// Used instead of the MIME type. Nobody outside a standards committee knows
+  /// what `application/vnd.openxmlformats-officedocument.wordprocessingml.document`
+  /// means, and printing it in a Details dialog tells the user nothing while
+  /// looking like a bug.
+  static String describeCategory(
+    String name, {
+    bool isDirectory = false,
+    String? mimeType,
+  }) {
+    if (isDirectory) return 'Folder';
+
+    final category = of(name);
+    final label = switch (category) {
+      FileCategory.folder => 'Folder',
+      FileCategory.image => 'Image',
+      FileCategory.video => 'Video',
+      FileCategory.audio => 'Audio',
+      FileCategory.document => 'Document',
+      FileCategory.spreadsheet => 'Spreadsheet',
+      FileCategory.presentation => 'Presentation',
+      FileCategory.archive => 'Archive',
+      FileCategory.code => 'Code',
+      FileCategory.text => 'Text',
+      FileCategory.pdf => 'PDF',
+      FileCategory.apk => 'Android app',
+      FileCategory.font => 'Font',
+      FileCategory.unknown => 'File',
+    };
+
+    final extension = of(name) == FileCategory.unknown
+        ? ''
+        : _extensionOf(name).toUpperCase();
+    return extension.isEmpty ? label : '$label · $extension';
+  }
+
+  static String _extensionOf(String name) {
+    final dot = name.lastIndexOf('.');
+    return dot <= 0 || dot == name.length - 1 ? '' : name.substring(dot + 1);
   }
 }

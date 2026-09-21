@@ -1,14 +1,15 @@
-/// Token entry — the one screen that spends failed-sign-in budget.
+/// Connecting the account.
 ///
-/// Everything here is shaped by a single fact from `docs/puter-api-research.md`
-/// §5: WebDAV returns `429` after **ten failed sign-ins in fifteen minutes**,
-/// and it does so *even for a correct token*. A retry loop therefore does not
-/// merely fail — it locks the user out of their own storage.
+/// Everything here is shaped by one fact from `docs/puter-api-research.md` §5:
+/// Puter returns `429` after **ten failed sign-ins in fifteen minutes**, and it
+/// does so *even for a correct key*. A retry loop therefore does not merely
+/// fail — it locks the user out of their own storage.
 ///
-/// So this screen submits **exactly once per tap**: no auto-retry, no
-/// debounce-and-resubmit, no background revalidation. On success it returns to
-/// the gate; on failure it shows what happened and hands control back to the
-/// user.
+/// So the screen submits **exactly once per tap**: no auto-retry, no
+/// debounce-and-resubmit, no background revalidation. The previous version
+/// explained all of that to the user, in a card, in developer terms
+/// ("WebDAV", "failed sign-ins", "window"). The rule is still enforced; the
+/// user now gets one sentence telling them how to avoid hitting it.
 library;
 
 import 'dart:async';
@@ -21,6 +22,9 @@ import '../../app/providers.dart';
 import '../../app/session.dart';
 import '../../core/config/app_config.dart';
 import '../../core/error/error_presenter.dart';
+import '../../core/ui/components.dart';
+import '../../core/ui/design.dart';
+import '../../data/platform/platform_bridge.dart';
 
 class TokenEntryScreen extends ConsumerStatefulWidget {
   const TokenEntryScreen({super.key});
@@ -33,7 +37,7 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
   final TextEditingController _controller = TextEditingController();
   final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
 
-  bool _isValidating = false;
+  bool _isConnecting = false;
   bool _obscured = true;
   ErrorPresentation? _failure;
 
@@ -44,24 +48,24 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
   }
 
   Future<void> _pasteFromClipboard() async {
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final text = data?.text?.trim();
+    final ClipboardData? data = await Clipboard.getData(Clipboard.kTextPlain);
+    final String? text = data?.text?.trim();
     if (text == null || text.isEmpty) return;
     _controller.text = text;
     setState(() => _failure = null);
   }
 
   Future<void> _submit() async {
-    if (_isValidating) return;
+    if (_isConnecting) return;
     if (!(_formKey.currentState?.validate() ?? false)) return;
 
-    // Trimmed because a copied token routinely arrives with a trailing newline,
+    // Trimmed because a copied key routinely arrives with a trailing newline,
     // and a credential that fails for an invisible reason is the worst possible
     // first experience.
-    final token = _controller.text.trim();
+    final String token = _controller.text.trim();
 
     setState(() {
-      _isValidating = true;
+      _isConnecting = true;
       _failure = null;
     });
 
@@ -69,7 +73,7 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
     if (!mounted) return;
 
     final SessionState? state = ref.read(sessionProvider).valueOrNull;
-    setState(() => _isValidating = false);
+    setState(() => _isConnecting = false);
 
     switch (state?.status) {
       case SessionStatus.ready:
@@ -77,7 +81,7 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
         // left for this screen to do.
         unawaited(Navigator.of(context).maybePop());
       case SessionStatus.failed:
-        final error = state?.error;
+        final Object? error = state?.error;
         if (error != null) {
           setState(() => _failure = ErrorPresenter.describe(error));
         }
@@ -91,29 +95,33 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
     final theme = Theme.of(context);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Enter token')),
+      appBar: AppBar(title: const Text('Access key')),
       body: Form(
         key: _formKey,
         child: ListView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.gutter,
+            AppSpacing.lg,
+            AppSpacing.gutter,
+            AppSpacing.xl,
+          ),
           children: <Widget>[
             Text(
-              'Paste your Puter auth token',
-              style: theme.textTheme.headlineSmall,
+              'Paste your access key',
+              style: theme.textTheme.titleLarge,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.sm),
             Text(
-              'Create it at puter.com/dashboard#account, in the API token '
-              'section. It is copied to your clipboard when you tap Create '
-              'token.',
+              'Puter copied it to your clipboard when you tapped Create token.',
               style: theme.textTheme.bodyMedium?.copyWith(
                 color: theme.colorScheme.onSurfaceVariant,
               ),
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: AppSpacing.xl),
+
             TextFormField(
               controller: _controller,
-              enabled: !_isValidating,
+              enabled: !_isConnecting,
               obscureText: _obscured,
               autocorrect: false,
               enableSuggestions: false,
@@ -123,82 +131,69 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
               onChanged: (_) {
                 if (_failure != null) setState(() => _failure = null);
               },
+              // Monospace, because a key is a string of lookalike characters
+              // and a proportional font makes `1`/`l`/`I` and `0`/`O`
+              // indistinguishable at exactly the moment the user is checking
+              // whether they pasted the right thing.
+              style: const TextStyle(
+                fontFamily: 'monospace',
+                fontSize: 14,
+                letterSpacing: 0.2,
+              ),
               decoration: InputDecoration(
-                labelText: 'Auth token',
-                hintText: 'Paste your token here',
-                border: const OutlineInputBorder(),
-                errorMaxLines: 3,
-                prefixIcon: const Icon(Icons.key_outlined),
-                suffixIcon: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    IconButton(
-                      icon: Icon(
-                        _obscured ? Icons.visibility_off : Icons.visibility,
-                      ),
-                      onPressed: () => setState(() => _obscured = !_obscured),
-                      tooltip: _obscured ? 'Show token' : 'Hide token',
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.content_paste),
-                      onPressed: _isValidating ? null : _pasteFromClipboard,
-                      tooltip: 'Paste from clipboard',
-                    ),
-                  ],
+                labelText: 'Access key',
+                hintText: 'Paste here',
+                prefixIcon: const Icon(Icons.key_rounded),
+                suffixIcon: IconButton(
+                  onPressed: _isConnecting ? null : _pasteFromClipboard,
+                  icon: const Icon(Icons.content_paste_rounded),
+                  tooltip: 'Paste from clipboard',
                 ),
               ),
               validator: (String? value) {
-                final text = value?.trim() ?? '';
-                if (text.isEmpty) return 'Enter the token from your dashboard.';
+                final String text = value?.trim() ?? '';
+                if (text.isEmpty) {
+                  return 'Paste the key from your Puter account page.';
+                }
                 if (text.length < 10) {
-                  return 'That looks too short to be a Puter token.';
+                  return 'That looks too short to be an access key.';
                 }
                 return null;
               },
             ),
-            if (_failure != null) ...<Widget>[
-              const SizedBox(height: 16),
-              Card(
-                color: theme.colorScheme.errorContainer,
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Icon(
-                        _failure!.icon,
-                        color: theme.colorScheme.onErrorContainer,
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Text(
-                              _failure!.title,
-                              style: theme.textTheme.titleSmall?.copyWith(
-                                color: theme.colorScheme.onErrorContainer,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              _failure!.message,
-                              style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onErrorContainer,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+
+            // One tap to hide or reveal, kept as a separate row rather than
+            // crammed beside the paste button: two 48dp targets competing for
+            // the same edge is how mistaps happen.
+            if (_controller.text.isNotEmpty || _obscured)
+              Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () => setState(() => _obscured = !_obscured),
+                  icon: Icon(
+                    _obscured
+                        ? Icons.visibility_rounded
+                        : Icons.visibility_off_rounded,
+                    size: 18,
                   ),
+                  label: Text(_obscured ? 'Show key' : 'Hide key'),
                 ),
               ),
+
+            if (_failure != null) ...<Widget>[
+              const SizedBox(height: AppSpacing.md),
+              InlineBanner(
+                tone: BannerTone.problem,
+                icon: _failure!.icon,
+                title: _failure!.title,
+                message: _failure!.message,
+              ),
             ],
-            const SizedBox(height: 24),
+
+            const SizedBox(height: AppSpacing.xl),
             FilledButton(
-              onPressed: _isValidating ? null : _submit,
-              child: _isValidating
+              onPressed: _isConnecting ? null : _submit,
+              child: _isConnecting
                   ? const SizedBox(
                       height: 20,
                       width: 20,
@@ -206,60 +201,21 @@ class _TokenEntryScreenState extends ConsumerState<TokenEntryScreen> {
                     )
                   : const Text('Connect'),
             ),
-            const SizedBox(height: 20),
-            const _LockoutNotice(),
-          ],
-        ),
-      ),
-    );
-  }
-}
 
-/// Explains the one strike the app must never earn.
-class _LockoutNotice extends StatelessWidget {
-  const _LockoutNotice();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Card(
-      color: theme.colorScheme.surfaceContainerHighest,
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Row(
-              children: <Widget>[
-                Icon(
-                  Icons.info_outline,
-                  size: 20,
-                  color: theme.colorScheme.onSurfaceVariant,
+            const SizedBox(height: AppSpacing.xl),
+            InlineBanner(
+              tone: BannerTone.info,
+              title: 'Try once, then check',
+              message: 'Puter temporarily blocks sign-ins for 15 minutes after '
+                  'ten failed attempts — even a correct key. This app tries '
+                  'once and stops, so if it does not connect, check the key on '
+                  'your Puter page before trying again.',
+              action: TextButton.icon(
+                onPressed: () => PlatformBridge.openUrl(
+                  PuterEndpoints.dashboardAccount,
                 ),
-                const SizedBox(width: 8),
-                // Expanded so a large font scale wraps the heading rather than
-                // overflowing the card.
-                Expanded(
-                  child: Text(
-                    'One attempt per tap',
-                    style: theme.textTheme.titleSmall,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Puter locks WebDAV access for 15 minutes after ten failed '
-              'sign-ins, and returns an error even for a correct token during '
-              'that window. So this screen tries once and never retries on its '
-              'own. If a token fails, check it on the dashboard first.',
-              style: theme.textTheme.bodySmall,
-            ),
-            const SizedBox(height: 8),
-            SelectableText(
-              PuterEndpoints.dashboardAccount,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.primary,
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                label: const Text('Open my Puter account page'),
               ),
             ),
           ],

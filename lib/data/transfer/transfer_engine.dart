@@ -31,6 +31,7 @@ import '../../core/error/error_presenter.dart';
 import '../../core/error/puter_exception.dart';
 import '../../domain/entities/remote_node.dart';
 import '../../domain/entities/remote_path.dart';
+import '../platform/device_files.dart';
 import '../repositories/file_repository.dart';
 import '../transport/puter_transport.dart';
 import 'transfer_store.dart';
@@ -54,15 +55,25 @@ class TransferEngine {
     required TransferStore store,
     AppConfig config = const AppConfig(),
     DateTime Function()? clock,
+    DeviceFileService deviceFiles = const UnavailableDeviceFiles(),
   })  : _repository = repository,
         _store = store,
         _config = config,
-        _clock = clock ?? DateTime.now;
+        _clock = clock ?? DateTime.now,
+        _deviceFiles = deviceFiles;
 
   final FileRepository _repository;
   final TransferStore _store;
   final AppConfig _config;
   final DateTime Function() _clock;
+
+  /// Used to release the staged copy of an uploaded file once it has landed.
+  ///
+  /// The engine owns the lifecycle of what it transfers, but only the platform
+  /// layer knows which files the app staged itself — and deleting a file the
+  /// user chose from elsewhere would be catastrophic. So the decision is
+  /// delegated rather than guessed at.
+  final DeviceFileService _deviceFiles;
 
   final Map<String, TransferTask> _tasks = <String, TransferTask>{};
   final Map<String, _ActiveTransfer> _active = <String, _ActiveTransfer>{};
@@ -208,12 +219,37 @@ class TransferEngine {
     _pump();
   }
 
+  /// Retry an upload that was refused because the name is already taken, this
+  /// time replacing what is there.
+  ///
+  /// The one thing the previous version could not do at all: a name collision
+  /// was a dead end that told the user to choose a different name, with no way
+  /// to say "no, replace it".
+  void replaceExisting(String id) {
+    final task = _tasks[id];
+    if (task == null || task.direction != TransferDirection.upload) return;
+    _update(
+      task.copyWith(
+        state: TransferState.queued,
+        attempts: 0,
+        overwrite: true,
+        clearError: true,
+      ),
+    );
+    _pump();
+  }
+
   /// Remove one task from the list, cancelling it first if it is still going.
   Future<void> dismiss(String id) async {
+    final TransferTask? task = _tasks[id];
     cancel(id);
     _tasks.remove(id);
     _active.remove(id);
     await _store.remove(id);
+    // An abandoned upload's staged copy is dead weight from here on.
+    if (task != null && task.direction == TransferDirection.upload) {
+      unawaited(_deviceFiles.discardStagedUpload(task.localPath));
+    }
     _emit();
   }
 
@@ -341,8 +377,8 @@ class TransferEngine {
 
     switch (task.direction) {
       case TransferDirection.upload:
-        final localPath = _uploadSourcePath(task);
-        final source = await _lengthOf(localPath);
+        final String localPath = task.localPath;
+        final int source = await _lengthOf(localPath);
 
         // Pre-flight the quota. The server enforces it anyway and answers 413,
         // but checking first means a large unwanted upload is refused before a
@@ -361,7 +397,7 @@ class TransferEngine {
           UploadRequest(
             localPath: localPath,
             remotePath: task.remotePath,
-            overwrite: _isOverwrite(task),
+            overwrite: task.overwrite,
             onProgress: (done, total) => _reportProgress(
               task.id,
               done,
@@ -443,6 +479,10 @@ class TransferEngine {
     if (task.direction != TransferDirection.upload) return;
     final parent = RemotePath.parent(task.remotePath) ?? RemotePath.root;
     await _repository.reconcile(parent);
+
+    // The staged copy has done its job. Releasing it here is what keeps a long
+    // session of uploading from filling the device.
+    await _deviceFiles.discardStagedUpload(task.localPath);
   }
 
   // ---------------------------------------------------------- progress plumbing
@@ -505,36 +545,27 @@ class TransferEngine {
     return tasks;
   }
 
-  /// The real local path for an upload.
-  ///
-  /// The overwrite flag is carried in [TransferTask.localPath] behind a NUL
-  /// separator — a character no filesystem path can contain — because the
-  /// persisted task schema has no column for it and adding one would mean a
-  /// migration for a single boolean.
-  static String _uploadSourcePath(TransferTask task) {
-    final marker = task.localPath.indexOf('\u0000');
-    return marker < 0 ? task.localPath : task.localPath.substring(0, marker);
-  }
-
-  static bool _isOverwrite(TransferTask task) =>
-      task.localPath.contains('\u0000overwrite');
-
   Future<int> _lengthOf(String path) async {
     try {
-      final file = File(path);
+      final File file = File(path);
       return file.existsSync() ? file.lengthSync() : 0;
     } on Object {
       return 0;
     }
   }
 
+  /// Read the quota, or `null` when it cannot be read.
+  ///
+  /// Catches **everything**, not just [PuterException]. Quota is advisory here:
+  /// the server enforces its own limit and answers `413`, which is a perfectly
+  /// clear answer that blocks exactly one task. Letting any failure of this
+  /// advisory read fail the transfer is how "uploads do not work but downloads
+  /// do" happens, because only uploads call it.
   Future<StorageUsage?> _tryUsage(PuterTransport transport) async {
     if (!transport.capabilities.canReportUsage) return null;
     try {
       return await transport.usage();
-    } on PuterException {
-      // Quota unknown. Attempt the transfer and let the server be the judge:
-      // a 413 is a perfectly clear answer and blocks only this task.
+    } on Object {
       return null;
     }
   }

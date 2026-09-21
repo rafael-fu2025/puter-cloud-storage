@@ -288,6 +288,7 @@ class TransferTask {
     this.attempts = 0,
     this.lastError,
     this.createdAt,
+    this.overwrite = false,
   });
 
   final String id;
@@ -300,6 +301,14 @@ class TransferTask {
   final int attempts;
   final String? lastError;
   final DateTime? createdAt;
+
+  /// Whether an upload may replace a file that is already there.
+  ///
+  /// Deliberately **not persisted**. A restart mid-replace therefore falls back
+  /// to refusing the collision, which is the safe direction — and recoverable,
+  /// because the user simply gets the Replace option again. Persisting it would
+  /// mean a schema migration for a transient user decision.
+  final bool overwrite;
 
   double get progress =>
       totalBytes <= 0 ? 0 : (bytesDone / totalBytes).clamp(0.0, 1.0);
@@ -327,6 +336,7 @@ class TransferTask {
     TransferState? state,
     int? attempts,
     String? lastError,
+    bool? overwrite,
 
     /// Clear [lastError] explicitly.
     ///
@@ -346,6 +356,7 @@ class TransferTask {
       attempts: attempts ?? this.attempts,
       lastError: clearError ? null : (lastError ?? this.lastError),
       createdAt: createdAt,
+      overwrite: overwrite ?? this.overwrite,
     );
   }
 

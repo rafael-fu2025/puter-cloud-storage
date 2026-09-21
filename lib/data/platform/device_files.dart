@@ -63,6 +63,14 @@ abstract class DeviceFileService {
   /// Hand a local file to whatever app can display it.
   Future<bool> openFile({required String localPath, String? mimeType});
 
+  /// Delete a file this service staged for an upload, once it is no longer
+  /// needed.
+  ///
+  /// A no-op for anything the app did not stage itself. Implementations must
+  /// refuse paths outside their own staging area rather than trusting the
+  /// argument — this deletes files.
+  Future<bool> discardStagedUpload(String localPath);
+
   /// Where downloads land when the user has not said otherwise.
   Future<Directory> downloadDirectory();
 }
@@ -131,6 +139,21 @@ class PlatformDeviceFiles implements DeviceFileService {
     }
   }
 
+  @override
+  Future<bool> discardStagedUpload(String localPath) async {
+    try {
+      final bool? removed = await _channel.invokeMethod<bool>(
+        'discardStagedUpload',
+        <String, dynamic>{'path': localPath},
+      );
+      return removed ?? false;
+    } on PlatformException {
+      return false;
+    } on MissingPluginException {
+      return false;
+    }
+  }
+
   /// The app-specific external downloads folder.
   ///
   /// Chosen over the public `Downloads` directory because writing there needs
@@ -190,6 +213,10 @@ class UnavailableDeviceFiles implements DeviceFileService {
   @override
   Future<bool> openFile({required String localPath, String? mimeType}) async =>
       false;
+
+  /// Nothing here stages anything, so there is never anything to discard.
+  @override
+  Future<bool> discardStagedUpload(String localPath) async => false;
 
   @override
   Future<Directory> downloadDirectory() async =>

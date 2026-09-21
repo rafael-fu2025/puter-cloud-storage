@@ -1,20 +1,26 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  What FileProvider is allowed to hand out.
+  What FileProvider is allowed to hand out to other apps.
 
-  Narrow on purpose. MainActivity only ever shares a file the user just
-  downloaded, and those live in the app-specific external Downloads folder, so
-  nothing else needs to be reachable. Enumerating fewer roots means a mistake in
-  the sharing path cannot expose the token database or the SQLite index.
+  Narrow on purpose, and narrower than it used to be. Only one thing is ever
+  shared: a file the user just downloaded, which lives in the app-specific
+  external Downloads folder. Enumerating fewer roots means a mistake in the
+  sharing path cannot reach the upload staging area, the SQLite index or the
+  encrypted token store.
+
+  The `cache-path` entry that used to be here is gone, because picked files are
+  no longer staged in the cache — Android may empty that at any time, including
+  while an upload is queued, which is why staging moved to `filesDir`. That
+  location is deliberately *not* listed: the app never shares a staged upload,
+  so it does not need to be reachable.
 -->
 <paths>
-    <!-- Downloads. Mirrors PlatformDeviceFiles.downloadDirectory(), which
-         resolves to <external-files>/Downloads on Android. -->
+    <!-- Downloads, the only thing the app shares. Mirrors
+         PlatformDeviceFiles.downloadDirectory(), which resolves to
+         <external-files>/Downloads on Android. -->
     <external-files-path name="downloads" path="Downloads/" />
     <!-- The whole app-specific external root, so a download that landed at the
-         top level (external storage unavailable at the time) is still openable. -->
+         top level — external storage unavailable at the time — is still
+         openable. -->
     <external-files-path name="external_files" path="." />
-    <!-- Picked uploads are copied here. Sharing one is a legitimate way to hand
-         a file to another app before or after uploading it. -->
-    <cache-path name="cache" path="." />
 </paths>

@@ -1,22 +1,27 @@
 /// The file browser.
 ///
-/// Three things about this screen are load-bearing rather than decorative.
+/// Four things about this screen are load-bearing rather than decorative.
 ///
-/// **The storage meter is not a progress bar.** `413 storage_limit_reached` is
-/// not retryable — when the account is full, uploads simply stop until the user
-/// frees space elsewhere. So the meter turns into a warning at 90% and says what
-/// to do, rather than letting the user discover the limit by watching an upload
-/// fail.
+/// **The header is one bar, not four.** The previous version stacked an app bar,
+/// a storage meter, a breadcrumb strip and a failure banner above the file list
+/// — up to 200dp of chrome before a single filename. The path now lives in the
+/// app bar's subtitle, where it is still readable and can be tapped to jump
+/// anywhere above; the storage meter appears only when it has something to say.
 ///
 /// **Partial listings are shown as partial.** A WebDAV `207 Multistatus` can
 /// carry per-entry failures while the response as a whole succeeds, so a folder
-/// can be genuinely incomplete. Entries the server refused are reported in a
-/// banner — dropping them silently would make files invisible with no
-/// explanation, which is the failure mode that destroys trust in a file manager.
+/// can be genuinely incomplete. Entries the server refused are reported — in
+/// plain language, without status codes — because dropping them silently makes
+/// files invisible with no explanation.
 ///
 /// **Empty is not the same as broken.** An empty folder, a folder that has never
-/// been visited offline, and a folder that failed to load are three different
-/// states, and they get three different screens.
+/// been opened offline, and a folder that failed to load are three different
+/// states with three different messages and three different actions.
+///
+/// **Long-press opens the actions.** Tapping a file used to open a sheet, which
+/// made a plain tap feel like a commitment; now a tap on a file also opens the
+/// sheet but a long-press does too, matching what people expect from a file
+/// manager on either platform.
 library;
 
 import 'package:flutter/material.dart';
@@ -26,38 +31,44 @@ import '../../app/providers.dart';
 import '../../core/error/error_presenter.dart';
 import '../../core/format/file_kinds.dart';
 import '../../core/format/formatters.dart';
+import '../../core/ui/components.dart';
+import '../../core/ui/design.dart';
 import '../../data/repositories/file_repository.dart';
 import '../../data/repositories/settings_repository.dart';
 import '../../domain/entities/remote_node.dart';
 import '../../domain/entities/remote_path.dart';
 import 'browser_providers.dart';
 import 'file_actions.dart';
+import 'sort_sheet.dart';
 
 class FileBrowserScreen extends ConsumerWidget {
   const FileBrowserScreen({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final path = ref.watch(browserPathProvider);
-    final listing = ref.watch(directoryListingProvider(path));
-    final preferences = ref.watch(browserPreferencesProvider).valueOrNull ??
-        const BrowserPreferences();
+    final String path = ref.watch(browserPathProvider);
+    final AsyncValue<DirectoryListing> listing =
+        ref.watch(directoryListingProvider(path));
+    final BrowserPreferences preferences =
+        ref.watch(browserPreferencesProvider).valueOrNull ??
+            const BrowserPreferences();
 
     return Scaffold(
-      appBar: _BrowserAppBar(path: path),
+      appBar: _FolderAppBar(path: path),
       floatingActionButton: FloatingActionButton.extended(
+        // A tooltip on a FAB is what a screen reader announces; without it the
+        // button is just "button".
+        tooltip: 'Upload files to this folder',
         onPressed: () => FileActions.upload(context, ref),
-        icon: const Icon(Icons.upload_file),
+        icon: const Icon(Icons.add_rounded),
         label: const Text('Upload'),
       ),
       body: Column(
         children: <Widget>[
-          const StorageMeter(),
-          Breadcrumbs(path: path),
-          const _PartialFailureBanner(),
+          const _Notices(),
           Expanded(
             child: listing.when(
-              loading: () => const Center(child: CircularProgressIndicator()),
+              loading: () => const LoadingState(),
               error: (Object error, StackTrace _) => _BrowserError(
                 error: error,
                 onRetry: () =>
@@ -67,12 +78,11 @@ class FileBrowserScreen extends ConsumerWidget {
                 onRefresh: () =>
                     ref.read(directoryListingProvider(path).notifier).refresh(),
                 child: value.items.isEmpty
-                    ? _EmptyFolder(path: path)
+                    ? _EmptyFolder(path: path, listing: value)
                     : _NodeList(
                         listing: value,
                         preferences: preferences,
-                        onOpen: (RemoteNode node) =>
-                            _open(context, ref, node),
+                        onOpen: (RemoteNode node) => _open(context, ref, node),
                       ),
               ),
             ),
@@ -92,348 +102,183 @@ class FileBrowserScreen extends ConsumerWidget {
       ref.read(browserPathProvider.notifier).state = node.path;
       return;
     }
-    await _showNodeSheet(context, ref, node);
+    await FileActions.showActions(context, ref, node);
   }
 }
 
-/// Title, view toggle, sort menu and the overflow.
-class _BrowserAppBar extends ConsumerWidget implements PreferredSizeWidget {
-  const _BrowserAppBar({required this.path});
+/// Folder name, path, and the actions that apply to the folder itself.
+class _FolderAppBar extends ConsumerWidget implements PreferredSizeWidget {
+  const _FolderAppBar({required this.path});
 
   final String path;
 
   @override
-  Size get preferredSize => const Size.fromHeight(kToolbarHeight);
+  Size get preferredSize => const Size.fromHeight(kToolbarHeight + 22);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final preferences = ref.watch(browserPreferencesProvider).valueOrNull ??
-        const BrowserPreferences();
-    final isRoot = path == RemotePath.root;
+    final theme = Theme.of(context);
+    final bool isRoot = path == RemotePath.root;
+    final String title = isRoot ? 'Files' : RemotePath.name(path);
 
     return AppBar(
-      title: Text(isRoot ? 'Files' : RemotePath.name(path)),
+      // Two-line title: the name is what the eye needs, the path is what it
+      // needs when it is lost. Showing both costs 22dp and removes the need for
+      // a permanent breadcrumb bar.
+      toolbarHeight: kToolbarHeight + 22,
       leading: isRoot
           ? null
           : IconButton(
-              icon: const Icon(Icons.arrow_back),
+              icon: const Icon(Icons.arrow_back_rounded),
               tooltip: 'Up one level',
-              onPressed: () => ref.read(browserPathProvider.notifier).state =
-                  RemotePath.parent(path) ?? RemotePath.root,
+              onPressed: () =>
+                  ref.read(browserPathProvider.notifier).state =
+                      RemotePath.parent(path) ?? RemotePath.root,
             ),
+      titleSpacing: isRoot ? AppSpacing.gutter : 0,
+      title: InkWell(
+        onTap: () => _showPathSheet(context, ref, path),
+        borderRadius: AppRadius.action,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: <Widget>[
+              Text(
+                title,
+                style: theme.textTheme.titleLarge,
+                overflow: TextOverflow.ellipsis,
+              ),
+              Text(
+                isRoot ? 'Puter' : _readablePath(path),
+                style: theme.textTheme.bodySmall,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ],
+          ),
+        ),
+      ),
       actions: <Widget>[
         IconButton(
-          icon: Icon(
-            preferences.viewMode == BrowserViewMode.grid
-                ? Icons.view_list
-                : Icons.grid_view,
+          icon: const Icon(Icons.sort_rounded),
+          tooltip: 'Sort',
+          onPressed: () => showSortSheet(
+            context,
+            ref,
+            ref.read(browserPreferencesProvider).valueOrNull ??
+                const BrowserPreferences(),
           ),
-          tooltip: preferences.viewMode == BrowserViewMode.grid
-              ? 'Show as list'
-              : 'Show as grid',
-          onPressed: () => ref.read(browserPreferencesProvider.notifier).apply(
-                (BrowserPreferences current) => current.copyWith(
-                  viewMode: current.viewMode == BrowserViewMode.grid
-                      ? BrowserViewMode.list
-                      : BrowserViewMode.grid,
-                ),
-              ),
         ),
-        _SortMenu(preferences: preferences),
-        PopupMenuButton<_BrowserMenuAction>(
-          tooltip: 'More',
-          onSelected: (_BrowserMenuAction action) => switch (action) {
-            _BrowserMenuAction.newFolder => FileActions.createFolder(context, ref),
-            _BrowserMenuAction.uploadHere => FileActions.upload(context, ref),
-            _BrowserMenuAction.refresh => ref
-                .read(directoryListingProvider(path).notifier)
-                .refresh(force: true),
-          },
-          itemBuilder: (BuildContext context) =>
-              const <PopupMenuEntry<_BrowserMenuAction>>[
-            PopupMenuItem<_BrowserMenuAction>(
-              value: _BrowserMenuAction.newFolder,
-              child: ListTile(
-                leading: Icon(Icons.create_new_folder_outlined),
-                title: Text('New folder'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-            PopupMenuItem<_BrowserMenuAction>(
-              value: _BrowserMenuAction.uploadHere,
-              child: ListTile(
-                leading: Icon(Icons.upload_file),
-                title: Text('Upload here'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-            PopupMenuItem<_BrowserMenuAction>(
-              value: _BrowserMenuAction.refresh,
-              child: ListTile(
-                leading: Icon(Icons.refresh),
-                title: Text('Refresh'),
-                contentPadding: EdgeInsets.zero,
-              ),
-            ),
-          ],
+        IconButton(
+          icon: const Icon(Icons.create_new_folder_outlined),
+          tooltip: 'New folder',
+          onPressed: () => FileActions.createFolder(context, ref),
         ),
       ],
     );
   }
+
+  /// `/Photos/2026` → `Photos  ›  2026`.
+  static String _readablePath(String path) =>
+      RemotePath.segments(path).join('  ›  ');
 }
 
-enum _BrowserMenuAction { newFolder, uploadHere, refresh }
+/// Jump to any folder above the current one.
+///
+/// Replaces the horizontally-scrolling breadcrumb strip, which read
+/// right-to-left (`reverse: true`) and only ever showed a window of a long
+/// path. A sheet lists the whole trail at once, which is what someone who is
+/// lost actually wants.
+Future<void> _showPathSheet(
+  BuildContext context,
+  WidgetRef ref,
+  String path,
+) async {
+  final List<({String label, String path})> crumbs =
+      RemotePath.breadcrumbs(path);
 
-/// Sort field and direction.
-class _SortMenu extends ConsumerWidget {
-  const _SortMenu({required this.preferences});
-
-  final BrowserPreferences preferences;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    return PopupMenuButton<NodeSortField>(
-      tooltip: 'Sort',
-      icon: const Icon(Icons.sort),
-      initialValue: preferences.sortField,
-      onSelected: (NodeSortField field) =>
-          ref.read(browserPreferencesProvider.notifier).apply(
-                (BrowserPreferences current) =>
-                    current.copyWith(sortField: field),
-              ),
-      itemBuilder: (BuildContext context) => <PopupMenuEntry<NodeSortField>>[
-        for (final field in NodeSortField.values)
-          PopupMenuItem<NodeSortField>(
-            value: field,
-            child: Row(
-              children: <Widget>[
-                if (field == preferences.sortField)
-                  const Icon(Icons.check, size: 18)
-                else
-                  const SizedBox(width: 18),
-                const SizedBox(width: 12),
-                Text(sortFieldLabel(field)),
-                const Spacer(),
-                if (field == preferences.sortField)
-                  Icon(
-                    preferences.sortOrder == SortOrder.ascending
-                        ? Icons.arrow_upward
-                        : Icons.arrow_downward,
-                    size: 16,
-                  ),
-              ],
+  await showModalBottomSheet<void>(
+    context: context,
+    builder: (BuildContext sheetContext) => AppSheet(
+      title: 'Go to folder',
+      subtitle: path == RemotePath.root ? 'Puter' : path,
+      children: <Widget>[
+        for (final ({String label, String path}) crumb
+            in crumbs.reversed.toList(growable: false))
+          AppListRow(
+            title: Text(crumb.label),
+            subtitle: Text(
+              crumb.path == RemotePath.root ? 'Top level' : crumb.path,
             ),
-          ),
-        const PopupMenuDivider(),
-        PopupMenuItem<NodeSortField>(
-          // A sentinel that flips the direction without changing the field.
-          value: preferences.sortField,
-          onTap: () =>
-              ref.read(browserPreferencesProvider.notifier).apply(
-                    (BrowserPreferences current) => current.copyWith(
-                      sortOrder: current.sortOrder == SortOrder.ascending
-                          ? SortOrder.descending
-                          : SortOrder.ascending,
-                    ),
-                  ),
-          child: const ListTile(
-            leading: Icon(Icons.swap_vert),
-            title: Text('Reverse order'),
-            contentPadding: EdgeInsets.zero,
-          ),
-        ),
-        PopupMenuItem<NodeSortField>(
-          value: preferences.sortField,
-          onTap: () =>
-              ref.read(browserPreferencesProvider.notifier).apply(
-                    (BrowserPreferences current) => current.copyWith(
-                      foldersFirst: !current.foldersFirst,
-                    ),
-                  ),
-          child: ListTile(
             leading: Icon(
-              preferences.foldersFirst
-                  ? Icons.check_box_outlined
-                  : Icons.check_box_outline_blank,
+              crumb.path == path
+                  ? Icons.folder_rounded
+                  : Icons.folder_outlined,
             ),
-            title: const Text('Folders first'),
-            contentPadding: EdgeInsets.zero,
+            trailing: crumb.path == path
+                ? Icon(
+                    Icons.check_rounded,
+                    color: Theme.of(sheetContext).colorScheme.primary,
+                  )
+                : null,
+            onTap: () {
+              Navigator.of(sheetContext).pop();
+              ref.read(browserPathProvider.notifier).state = crumb.path;
+            },
           ),
-        ),
       ],
-    );
-  }
+    ),
+  );
 }
 
-/// Quota, with the warning that arrives before the error does.
-class StorageMeter extends ConsumerWidget {
-  const StorageMeter({super.key});
+/// Conditions worth mentioning, in one place, only when true.
+///
+/// The storage meter used to occupy a permanent bar. Here it appears only when
+/// the account is nearly full — the moment it becomes actionable — and the
+/// partial-listing notice only when the server actually withheld something.
+class _Notices extends ConsumerWidget {
+  const _Notices();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final usage = ref.watch(storageUsageProvider).valueOrNull;
-    final config = ref.watch(appConfigProvider);
-    if (usage == null) return const SizedBox.shrink();
+    final String path = ref.watch(browserPathProvider);
+    final DirectoryListing? listing =
+        ref.watch(directoryListingProvider(path)).valueOrNull;
+    final StorageUsage? usage = ref.watch(storageUsageProvider).valueOrNull;
+    final double threshold = ref.watch(appConfigProvider).quotaWarningThreshold;
 
-    final isNearLimit =
-        usage.isNearLimit(config.quotaWarningThreshold);
-    final background =
-        isNearLimit ? theme.colorScheme.errorContainer : Colors.transparent;
-    final foreground = isNearLimit
-        ? theme.colorScheme.onErrorContainer
-        : theme.colorScheme.onSurfaceVariant;
+    final bool isNearlyFull = usage != null && usage.isNearLimit(threshold);
+    final List<NodeFailure> failures =
+        listing?.failures ?? const <NodeFailure>[];
 
-    return Material(
-      color: background,
-      child: InkWell(
-        onTap: () => ref.invalidate(storageUsageProvider),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Text(
-                    '${ByteFormat.format(usage.usedBytes)} of '
-                    '${ByteFormat.format(usage.capacityBytes)} used',
-                    style: theme.textTheme.bodySmall?.copyWith(color: foreground),
-                  ),
-                  const Spacer(),
-                  Text(
-                    '${usage.percentage.toStringAsFixed(1)}%',
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: foreground,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 6),
-              LinearProgressIndicator(
-                value: usage.usedFraction,
-                backgroundColor: theme.colorScheme.surfaceContainerHighest,
-                color: isNearLimit
-                    ? theme.colorScheme.error
-                    : theme.colorScheme.primary,
-              ),
-              if (isNearLimit) ...<Widget>[
-                const SizedBox(height: 6),
-                Text(
-                  'Almost out of space. Uploads will be refused once the quota '
-                  'is full — free space in the Puter web app to keep going.',
-                  style: theme.textTheme.bodySmall?.copyWith(color: foreground),
-                ),
-              ],
-            ],
+    return Column(
+      children: <Widget>[
+        if (isNearlyFull)
+          InlineBanner(
+            tone: BannerTone.warning,
+            icon: Icons.sd_card_alert_outlined,
+            title: 'Almost out of storage space',
+            message: '${ByteFormat.format(usage.freeBytes)} left of '
+                '${ByteFormat.format(usage.capacityBytes)}. Uploads will be '
+                'refused once it is full — free space in the Puter app to keep '
+                'going.',
           ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Where the user is, and how to get back up.
-class Breadcrumbs extends ConsumerWidget {
-  const Breadcrumbs({super.key, required this.path});
-
-  final String path;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final crumbs = RemotePath.breadcrumbs(path);
-
-    return Container(
-      height: 40,
-      decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(
-          bottom: BorderSide(color: theme.colorScheme.outlineVariant),
-        ),
-      ),
-      child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        // A deep path can exceed the width, so the list is reversed to keep the
-        // current folder reachable without scrolling.
-        reverse: true,
-        itemCount: crumbs.length,
-        itemBuilder: (BuildContext context, int index) {
-          final crumb = crumbs[crumbs.length - 1 - index];
-          final isLast = crumb.path == path;
-          return Row(
-            children: <Widget>[
-              if (index > 0)
-                Icon(
-                  Icons.chevron_right,
-                  size: 16,
-                  color: theme.colorScheme.onSurfaceVariant,
-                ),
-              TextButton(
-                onPressed: isLast
-                    ? null
-                    : () =>
-                        ref.read(browserPathProvider.notifier).state = crumb.path,
-                child: Text(
-                  crumb.label,
-                  style: TextStyle(
-                    fontWeight: isLast ? FontWeight.w600 : FontWeight.normal,
-                  ),
-                ),
-              ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// Reports entries the server returned but refused to describe.
-class _PartialFailureBanner extends ConsumerWidget {
-  const _PartialFailureBanner();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final path = ref.watch(browserPathProvider);
-    final listing = ref.watch(directoryListingProvider(path)).valueOrNull;
-    final failures = listing?.failures ?? const <NodeFailure>[];
-    if (failures.isEmpty) return const SizedBox.shrink();
-
-    final theme = Theme.of(context);
-    return Material(
-      color: theme.colorScheme.tertiaryContainer,
-      child: ExpansionTile(
-        leading: Icon(
-          Icons.warning_amber_outlined,
-          color: theme.colorScheme.onTertiaryContainer,
-        ),
-        title: Text(
-          '${failures.length} item${failures.length == 1 ? '' : 's'} could not '
-          'be read',
-          style: theme.textTheme.bodyMedium?.copyWith(
-            color: theme.colorScheme.onTertiaryContainer,
-          ),
-        ),
-        children: <Widget>[
-          for (final failure in failures)
-            ListTile(
-              dense: true,
-              title: Text(
-                failure.path,
-                style: theme.textTheme.bodySmall,
-              ),
-              subtitle: Text(
-                failure.statusCode == null
-                    ? failure.message
-                    : '${failure.message} (HTTP ${failure.statusCode})',
-                style: theme.textTheme.bodySmall,
-              ),
+        if (failures.isNotEmpty)
+          InlineBanner(
+            tone: BannerTone.info,
+            icon: Icons.warning_amber_rounded,
+            title: failures.length == 1
+                ? 'One item could not be shown'
+                : '${failures.length} items could not be shown',
+            message: 'This folder may be incomplete. Pull down to try again.',
+            action: TextButton(
+              onPressed: () =>
+                  ref.read(directoryListingProvider(path).notifier).refresh(),
+              child: const Text('Try again'),
             ),
-        ],
-      ),
+          ),
+      ],
     );
   }
 }
@@ -452,189 +297,65 @@ class _NodeList extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final sorted = applySort(listing.items, preferences);
+    final List<RemoteNode> sorted = applySort(listing.items, preferences);
 
     if (preferences.viewMode == BrowserViewMode.grid) {
       return GridView.builder(
-        padding: const EdgeInsets.fromLTRB(12, 12, 12, 96),
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.lg,
+          AppSpacing.lg,
+          AppSpacing.lg,
+          104,
+        ),
         physics: const AlwaysScrollableScrollPhysics(),
         gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
-          maxCrossAxisExtent: 160,
-          childAspectRatio: 0.82,
-          mainAxisSpacing: 12,
-          crossAxisSpacing: 12,
+          maxCrossAxisExtent: 168,
+          childAspectRatio: 0.86,
+          mainAxisSpacing: AppSpacing.md,
+          crossAxisSpacing: AppSpacing.md,
         ),
         itemCount: sorted.length,
-        itemBuilder: (BuildContext context, int index) => _GridTile(
-          node: sorted[index],
-          onOpen: onOpen,
-        ),
+        itemBuilder: (BuildContext context, int index) =>
+            _GridTile(node: sorted[index], onOpen: onOpen),
       );
     }
 
-    return ListView.builder(
-      padding: const EdgeInsets.only(bottom: 96),
+    return ListView.separated(
+      padding: const EdgeInsets.only(bottom: 104),
       physics: const AlwaysScrollableScrollPhysics(),
       itemCount: sorted.length,
-      itemBuilder: (BuildContext context, int index) => _ListTile(
-        node: sorted[index],
-        onOpen: onOpen,
-      ),
+      separatorBuilder: (BuildContext context, int index) => const AppDivider(),
+      itemBuilder: (BuildContext context, int index) =>
+          _FileRow(node: sorted[index], onOpen: onOpen),
     );
   }
 }
 
-/// Trailing actions shared by both layouts.
-List<PopupMenuEntry<_NodeAction>> _nodeMenuItems() =>
-    const <PopupMenuEntry<_NodeAction>>[
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.download,
-    child: ListTile(
-      leading: Icon(Icons.download_outlined),
-      title: Text('Download'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.rename,
-    child: ListTile(
-      leading: Icon(Icons.drive_file_rename_outline),
-      title: Text('Rename'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.move,
-    child: ListTile(
-      leading: Icon(Icons.drive_file_move_outlined),
-      title: Text('Move'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.copy,
-    child: ListTile(
-      leading: Icon(Icons.content_copy_outlined),
-      title: Text('Copy'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.details,
-    child: ListTile(
-      leading: Icon(Icons.info_outline),
-      title: Text('Details'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-  PopupMenuDivider(),
-  PopupMenuItem<_NodeAction>(
-    value: _NodeAction.delete,
-    child: ListTile(
-      leading: Icon(Icons.delete_outline),
-      title: Text('Delete'),
-      contentPadding: EdgeInsets.zero,
-    ),
-  ),
-];
-
-enum _NodeAction { download, rename, move, copy, details, delete }
-
-/// Runs the action chosen from a node's menu.
-Future<void> _handleNodeAction(
-  BuildContext context,
-  WidgetRef ref,
-  RemoteNode node,
-  _NodeAction action,
-) async {
-  switch (action) {
-    case _NodeAction.download:
-      await FileActions.download(context, ref, node);
-    case _NodeAction.rename:
-      await FileActions.rename(context, ref, node);
-    case _NodeAction.move:
-      await FileActions.move(context, ref, node);
-    case _NodeAction.copy:
-      await FileActions.copy(context, ref, node);
-    case _NodeAction.details:
-      await FileActions.showDetails(context, ref, node);
-    case _NodeAction.delete:
-      await FileActions.delete(context, ref, node);
-  }
-}
-
-/// The same sheet, reachable by tapping a file.
-Future<void> _showNodeSheet(
-  BuildContext context,
-  WidgetRef ref,
-  RemoteNode node,
-) async {
-  final theme = Theme.of(context);
-  final category = FileKinds.of(node.name, isDirectory: node.isDirectory);
-
-  final action = await showModalBottomSheet<_NodeAction>(
-    context: context,
-    showDragHandle: true,
-    builder: (BuildContext sheetContext) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          ListTile(
-            leading: Icon(
-              FileKinds.iconFor(category),
-              color: FileKinds.tintFor(category, theme.colorScheme),
-            ),
-            title: Text(node.name, overflow: TextOverflow.ellipsis),
-            subtitle: Text(
-              '${ByteFormat.format(node.sizeBytes)} · '
-              '${DateFormatting.relative(node.modifiedAt)}',
-            ),
-          ),
-          const Divider(height: 1),
-          for (final item in _nodeMenuItems())
-            if (item is PopupMenuItem<_NodeAction>)
-              ListTile(
-                leading: (item.child as ListTile).leading,
-                title: (item.child as ListTile).title,
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(item.value),
-              ),
-        ],
-      ),
-    ),
-  );
-
-  if (action == null || !context.mounted) return;
-  await _handleNodeAction(context, ref, node, action);
-}
-
-class _ListTile extends ConsumerWidget {
-  const _ListTile({required this.node, required this.onOpen});
+/// One file or folder in the list.
+class _FileRow extends ConsumerWidget {
+  const _FileRow({required this.node, required this.onOpen});
 
   final RemoteNode node;
   final Future<void> Function(RemoteNode node) onOpen;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final subtitle = node.isDirectory
-        ? (node.modifiedAt == null
-            ? 'Folder'
-            : 'Folder · ${DateFormatting.relative(node.modifiedAt)}')
-        : '${ByteFormat.format(node.sizeBytes)} · '
-            '${DateFormatting.relative(node.modifiedAt)}';
+    final String modified = node.modifiedAt == null
+        ? ''
+        : ' · ${DateFormatting.relative(node.modifiedAt)}';
+    final String meta = node.isDirectory
+        ? 'Folder$modified'
+        : '${ByteFormat.format(node.sizeBytes)}$modified';
 
-    return ListTile(
-      leading: _NodeIcon(node: node),
-      title: Text(node.name, overflow: TextOverflow.ellipsis),
-      subtitle: Text(subtitle, style: theme.textTheme.bodySmall),
-      trailing: PopupMenuButton<_NodeAction>(
-        tooltip: 'Actions for ${node.name}',
-        onSelected: (_NodeAction action) =>
-            _handleNodeAction(context, ref, node, action),
-        itemBuilder: (BuildContext context) => _nodeMenuItems(),
-      ),
+    return AppListRow(
+      leading: FileKindIcon(node: node, size: 26),
+      title: Text(node.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+      subtitle: Text(meta),
+      trailing: node.isDirectory
+          ? const Icon(Icons.chevron_right_rounded)
+          : null,
       onTap: () => onOpen(node),
+      onLongPress: () => FileActions.showActions(context, ref, node),
     );
   }
 }
@@ -649,31 +370,30 @@ class _GridTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
 
-    return Card(
+    return Material(
       color: theme.colorScheme.surfaceContainerLow,
+      borderRadius: AppRadius.card,
+      clipBehavior: Clip.antiAlias,
       child: InkWell(
         onTap: () => onOpen(node),
-        onLongPress: () => _handleNodeAction(
-          context,
-          ref,
-          node,
-          _NodeAction.details,
-        ),
+        onLongPress: () => FileActions.showActions(context, ref, node),
         child: Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: <Widget>[
-              _NodeIcon(node: node, size: 40),
-              const SizedBox(height: 12),
+              FileKindIcon(node: node, size: 38),
+              const SizedBox(height: AppSpacing.md),
               Text(
                 node.name,
                 maxLines: 2,
                 textAlign: TextAlign.center,
                 overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.onSurface,
+                ),
               ),
-              const SizedBox(height: 4),
+              const SizedBox(height: 2),
               Text(
                 node.isDirectory ? 'Folder' : ByteFormat.format(node.sizeBytes),
                 style: theme.textTheme.labelSmall?.copyWith(
@@ -688,17 +408,18 @@ class _GridTile extends ConsumerWidget {
   }
 }
 
-/// Type icon, tinted by category.
-class _NodeIcon extends StatelessWidget {
-  const _NodeIcon({required this.node, this.size = 24});
+/// The type icon for a node, tinted by category.
+class FileKindIcon extends StatelessWidget {
+  const FileKindIcon({super.key, required this.node, this.size = 24});
 
   final RemoteNode node;
   final double size;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final category = FileKinds.of(node.name, isDirectory: node.isDirectory);
+    final ColorScheme scheme = Theme.of(context).colorScheme;
+    final FileCategory category =
+        FileKinds.of(node.name, isDirectory: node.isDirectory);
     return Icon(
       FileKinds.iconFor(category),
       size: size,
@@ -709,85 +430,45 @@ class _NodeIcon extends StatelessWidget {
 
 /// Nothing here yet — and, when browsing offline, why that might mean nothing.
 class _EmptyFolder extends ConsumerWidget {
-  const _EmptyFolder({required this.path});
+  const _EmptyFolder({required this.path, required this.listing});
 
   final String path;
+  final DirectoryListing listing;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final theme = Theme.of(context);
-    final repository = ref.watch(fileRepositoryProvider);
-    final listing = ref.watch(directoryListingProvider(path)).valueOrNull;
-    final isCached = listing?.fromCache ?? false;
-    final isRoot = path == RemotePath.root;
+    final bool isRoot = path == RemotePath.root;
+    final bool isOfflineCopy = listing.fromCache;
 
-    return ListView(
-      // Scrollable so pull-to-refresh still works on an empty folder.
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: <Widget>[
-        SizedBox(height: MediaQuery.sizeOf(context).height * 0.12),
-        Icon(
-          Icons.folder_open,
-          size: 64,
-          color: theme.colorScheme.onSurfaceVariant,
+    return AppEmptyState(
+      icon:
+          isOfflineCopy ? Icons.cloud_off_rounded : Icons.folder_open_rounded,
+      title: isOfflineCopy
+          ? 'Nothing saved from this folder'
+          : 'This folder is empty',
+      message: isOfflineCopy
+          ? 'This folder has not been opened on this device yet, so there is '
+              'nothing to show offline. Pull down to load it.'
+          : 'Add a file from your phone, or make a folder to organise things.',
+      primaryAction: FilledButton.icon(
+        onPressed: () => FileActions.upload(context, ref, intoPath: path),
+        icon: const Icon(Icons.add_rounded),
+        label: const Text('Upload a file'),
+      ),
+      secondaryActions: <Widget>[
+        OutlinedButton.icon(
+          onPressed: () => FileActions.createFolder(context, ref),
+          icon: const Icon(Icons.create_new_folder_outlined),
+          label: const Text('New folder'),
         ),
-        const SizedBox(height: 16),
-        Text(
-          'This folder is empty',
-          textAlign: TextAlign.center,
-          style: theme.textTheme.titleMedium,
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 40),
-          child: Text(
-            isCached
-                ? 'Showing what was saved locally. Pull down to check the '
-                    'server — this folder has not been read since you were last '
-                    'online.'
-                : 'Upload a file, or create a folder to get started.',
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
+        if (!isRoot)
+          OutlinedButton.icon(
+            onPressed: () =>
+                ref.read(browserPathProvider.notifier).state =
+                    RemotePath.parent(path) ?? RemotePath.root,
+            icon: const Icon(Icons.arrow_upward_rounded),
+            label: const Text('Go up'),
           ),
-        ),
-        const SizedBox(height: 24),
-        Center(
-          child: Wrap(
-            spacing: 12,
-            alignment: WrapAlignment.center,
-            children: <Widget>[
-              OutlinedButton.icon(
-                onPressed: () => FileActions.createFolder(context, ref),
-                icon: const Icon(Icons.create_new_folder_outlined),
-                label: const Text('New folder'),
-              ),
-              if (!isRoot)
-                OutlinedButton.icon(
-                  onPressed: () =>
-                      ref.read(browserPathProvider.notifier).state =
-                          RemotePath.parent(path) ?? RemotePath.root,
-                  icon: const Icon(Icons.arrow_upward),
-                  label: const Text('Go up'),
-                ),
-            ],
-          ),
-        ),
-        if (repository != null && !repository.capabilities.canWrite) ...<Widget>[
-          const SizedBox(height: 24),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 40),
-            child: Text(
-              'The active transport cannot write to this account, so uploads '
-              'and new folders are unavailable.',
-              textAlign: TextAlign.center,
-              style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-        ],
       ],
     );
   }
@@ -802,41 +483,12 @@ class _BrowserError extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final presentation = ErrorPresenter.describe(error);
-
-    return ListView(
-      physics: const AlwaysScrollableScrollPhysics(),
-      children: <Widget>[
-        SizedBox(height: MediaQuery.sizeOf(context).height * 0.12),
-        Icon(presentation.icon, size: 64, color: theme.colorScheme.error),
-        const SizedBox(height: 16),
-        Text(
-          presentation.title,
-          textAlign: TextAlign.center,
-          style: theme.textTheme.titleMedium,
-        ),
-        const SizedBox(height: 8),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 40),
-          child: Text(
-            presentation.message,
-            textAlign: TextAlign.center,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurfaceVariant,
-            ),
-          ),
-        ),
-        const SizedBox(height: 24),
-        if (presentation.canRetry)
-          Center(
-            child: FilledButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Try again'),
-            ),
-          ),
-      ],
+    final ErrorPresentation presentation = ErrorPresenter.describe(error);
+    return AppErrorView(
+      icon: presentation.icon,
+      title: presentation.title,
+      message: presentation.message,
+      onRetry: presentation.canRetry ? onRetry : null,
     );
   }
 }

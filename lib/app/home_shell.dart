@@ -16,12 +16,6 @@ import '../features/settings/settings_screen.dart';
 import '../features/transfers/transfer_screen.dart';
 import 'providers.dart';
 
-/// The shell's destinations.
-enum HomeTab { files, transfers, search, settings }
-
-/// Which tab is showing.
-final homeTabProvider = StateProvider<HomeTab>((ref) => HomeTab.files);
-
 /// The bottom-navigation shell.
 class HomeShell extends ConsumerWidget {
   const HomeShell({super.key});

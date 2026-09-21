@@ -1,13 +1,23 @@
-/// First run: what this app is, what it will ask for, and why.
+/// First run.
 ///
-/// The disclosure here is a security requirement, not copy polish. The user is
-/// being asked to hand over an account-wide root credential, and is entitled to
-/// know that before pasting it — docs/security.md §5.
+/// Two things have to coexist here: this is the friendliest screen in the app,
+/// and it is also where the user hands over a credential that grants full
+/// access to their account (`docs/security.md` §5). The previous version tried
+/// to resolve that tension by shouting — a pink `errorContainer` card with a
+/// warning triangle, before the user had seen a single file. That reads as
+/// "something has already gone wrong", which is not the feeling to open on.
+///
+/// The disclosure is still here, in full, and still says what the key can do. It
+/// is simply delivered as information rather than as an alarm, because the
+/// honest framing is "here is what you are about to do" and not "danger".
 library;
 
 import 'package:flutter/material.dart';
 
 import '../core/config/app_config.dart';
+import '../core/ui/components.dart';
+import '../core/ui/design.dart';
+import '../data/platform/platform_bridge.dart';
 import '../features/auth/token_entry_screen.dart';
 
 class WelcomeScreen extends StatelessWidget {
@@ -20,94 +30,127 @@ class WelcomeScreen extends StatelessWidget {
     return Scaffold(
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(24, 32, 24, 24),
+          padding: const EdgeInsets.fromLTRB(
+            AppSpacing.gutter,
+            AppSpacing.xxl,
+            AppSpacing.gutter,
+            AppSpacing.xl,
+          ),
           children: <Widget>[
-            Icon(
-              Icons.cloud_outlined,
-              size: 72,
-              color: theme.colorScheme.primary,
-            ),
-            const SizedBox(height: 24),
-            Text(
-              'Connect your Puter account',
-              style: theme.textTheme.headlineSmall,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            Text(
-              'This app reaches your Puter storage directly. It signs in with an '
-              'auth token you create yourself, so there is no password to share '
-              'and no OAuth popup.',
-              style: theme.textTheme.bodyMedium,
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 28),
-            Card(
-              color: theme.colorScheme.errorContainer,
-              child: Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Row(
-                      children: <Widget>[
-                        Icon(
-                          Icons.warning_amber_rounded,
-                          color: theme.colorScheme.onErrorContainer,
-                        ),
-                        const SizedBox(width: 8),
-                        // Expanded, not a bare Text: the heading is the first
-                        // thing to overflow on a narrow screen or at a large
-                        // font scale, and an overlong title is a far better
-                        // failure than a clipped one.
-                        Expanded(
-                          child: Text(
-                            'Before you continue',
-                            style: theme.textTheme.titleMedium?.copyWith(
-                              color: theme.colorScheme.onErrorContainer,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 12),
-                    Text(
-                      'Your Puter auth token grants full access to your Puter '
-                      'account. Anyone who obtains it can read, modify, and '
-                      'delete your files.\n\n'
-                      'Store it as you would a password. You can revoke it at '
-                      'any time from your Puter dashboard.',
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: theme.colorScheme.onErrorContainer,
-                      ),
-                    ),
-                  ],
+            Column(
+              children: <Widget>[
+                Container(
+                  width: 88,
+                  height: 88,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primaryContainer
+                        .withValues(alpha: 0.45),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.cloud_rounded,
+                    size: 44,
+                    color: theme.colorScheme.primary,
+                  ),
                 ),
-              ),
-            ),
-            const SizedBox(height: 28),
-            Text('Create a token', style: theme.textTheme.titleMedium),
-            const SizedBox(height: 8),
-            const _Steps(
-              steps: <String>[
-                'Sign in at puter.com/dashboard#account',
-                'Find the API token section',
-                'Click Create token — it is copied to your clipboard',
-                'Return here and paste it on the next screen',
+                const SizedBox(height: AppSpacing.xl),
+                Text(
+                  'Your files, on Puter',
+                  style: theme.textTheme.headlineSmall,
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  'Browse, search and move the files in your own Puter '
+                  'account, from your phone.',
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: theme.colorScheme.onSurfaceVariant,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
               ],
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: AppSpacing.xxl),
+
+            // What the user is about to hand over, stated plainly and without
+            // alarm. This is the security disclosure required by
+            // docs/security.md §5 — it is not optional copy.
+            SectionCard(
+              title: 'What you will need',
+              children: <Widget>[
+                const _Step(
+                  number: 1,
+                  title: 'Open your Puter account',
+                  detail: 'In a browser, go to puter.com and sign in.',
+                ),
+                const _Step(
+                  number: 2,
+                  title: 'Create an access key',
+                  detail: 'On the Account page, find the API token section and '
+                      'tap Create token. Puter copies it for you.',
+                ),
+                const _Step(
+                  number: 3,
+                  title: 'Paste it here',
+                  detail: 'Come back and paste it in. This app will keep it '
+                      'securely on this device.',
+                  isLast: true,
+                ),
+                const AppDivider(),
+                Padding(
+                  padding: const EdgeInsets.all(AppSpacing.lg),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Icon(
+                        Icons.shield_outlined,
+                        size: 20,
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: AppSpacing.md),
+                      Expanded(
+                        child: Text(
+                          'An access key lets this app read, change and delete '
+                          'anything in your Puter account — it is as powerful '
+                          'as your password. Keep it private, and revoke it '
+                          'from the same Puter page whenever you like.',
+                          style: theme.textTheme.bodySmall,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+
             FilledButton.icon(
               onPressed: () => Navigator.of(context).push(
                 MaterialPageRoute<void>(
                   builder: (_) => const TokenEntryScreen(),
                 ),
               ),
-              icon: const Icon(Icons.key_outlined),
-              label: const Text('Enter token'),
+              icon: const Icon(Icons.key_rounded),
+              label: const Text('Add my access key'),
             ),
-            const SizedBox(height: 20),
-            const _Attribution(),
+            const SizedBox(height: AppSpacing.md),
+            Center(
+              child: TextButton.icon(
+                onPressed: () => PlatformBridge.openUrl(
+                  PuterEndpoints.dashboardAccount,
+                ),
+                icon: const Icon(Icons.open_in_new_rounded, size: 18),
+                label: const Text('Open Puter to get a key'),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.xl),
+            Center(
+              child: Text(
+                'Built on Puter · developer.puter.com',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
           ],
         ),
       ),
@@ -115,66 +158,68 @@ class WelcomeScreen extends StatelessWidget {
   }
 }
 
-class _Steps extends StatelessWidget {
-  const _Steps({required this.steps});
+/// One numbered step.
+///
+/// A real numbered badge rather than "1." in bold text, so the sequence is
+/// something the eye can follow without reading every line.
+class _Step extends StatelessWidget {
+  const _Step({
+    required this.number,
+    required this.title,
+    required this.detail,
+    this.isLast = false,
+  });
 
-  final List<String> steps;
+  final int number;
+  final String title;
+  final String detail;
+  final bool isLast;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        for (var i = 0; i < steps.length; i++)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 4),
-            child: Row(
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.lg,
+        AppSpacing.md,
+        AppSpacing.lg,
+        AppSpacing.md,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Container(
+            width: 26,
+            height: 26,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primary.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              '$number',
+              style: theme.textTheme.labelMedium?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.md),
+          Expanded(
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: <Widget>[
-                Text(
-                  '${i + 1}.',
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(steps[i], style: theme.textTheme.bodyMedium),
-                ),
+                Text(title, style: theme.textTheme.bodyLarge?.copyWith(
+                  fontWeight: FontWeight.w600,
+                )),
+                const SizedBox(height: 2),
+                Text(detail, style: theme.textTheme.bodySmall),
               ],
             ),
           ),
-      ],
-    );
-  }
-}
-
-/// Required attribution: apps built on Puter are expected to link back.
-class _Attribution extends StatelessWidget {
-  const _Attribution();
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return Column(
-      children: <Widget>[
-        Text(
-          'Powered by Puter',
-          textAlign: TextAlign.center,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.onSurfaceVariant,
-          ),
-        ),
-        const SizedBox(height: 2),
-        SelectableText(
-          PuterEndpoints.attributionUrl,
-          textAlign: TextAlign.center,
-          style: theme.textTheme.bodySmall?.copyWith(
-            color: theme.colorScheme.primary,
-          ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

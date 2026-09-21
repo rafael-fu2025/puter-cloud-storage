@@ -652,6 +652,40 @@ void main() {
       expect(engine.snapshot.single.state, TransferState.completed);
       await engine.dispose();
     });
+
+    test('a quota read that fails unexpectedly still lets the upload through',
+        () async {
+      // A transport can leak something that is not a PuterException — a raw
+      // parse error from a body that was not the XML it expected. Quota is
+      // advisory, so the pre-flight must not be able to fail a transfer. Note
+      // that only uploads consult it, which is exactly the shape of "downloads
+      // work, uploads do not".
+      transport.capabilities =
+          const TransportCapabilities(canReportUsage: true);
+      transport.usageError = const FormatException('body was not XML');
+
+      final engine = buildEngine();
+      await engine.restore();
+
+      await engine.enqueueUpload(
+        localPath: '/tmp/small.bin',
+        remotePath: '/Documents/small.bin',
+        sizeBytes: 50,
+      );
+      await waitFor(
+        engine,
+        (List<TransferTask> tasks) =>
+            tasks.every((TransferTask t) => t.isFinished),
+      );
+
+      expect(
+        engine.snapshot.single.state,
+        TransferState.completed,
+        reason: 'a failed quota read must not fail the transfer',
+      );
+      expect(transport.uploads, hasLength(1));
+      await engine.dispose();
+    });
   });
 
   group('housekeeping', () {

@@ -59,6 +59,11 @@ class MainActivity : FlutterActivity() {
                         call.argument<String>("mimeType"),
                         result,
                     )
+                    "openUrl" -> openUrl(call.argument<String>("url"), result)
+                    "discardStagedUpload" -> discardStagedUpload(
+                        call.argument<String>("path"),
+                        result,
+                    )
                     else -> result.notImplemented()
                 }
             }
@@ -120,15 +125,22 @@ class MainActivity : FlutterActivity() {
     }
 
     /**
-     * Copy a picked document into the cache under a directory of its own.
+     * Copy a picked document into app storage under a directory of its own.
      *
      * One directory per pick, so two files with the same name chosen from
      * different folders cannot overwrite each other between selection and
      * upload.
+     *
+     * **`filesDir`, not `cacheDir`.** This was the cache, which Android is free
+     * to empty whenever it wants space — including while an upload is sitting in
+     * the queue waiting its turn. A queued upload whose source has been evicted
+     * fails with "local file does not exist" and looks like a bug in the upload
+     * rather than in where the file was put. The app deletes these itself once
+     * each upload is done, via [discardStagedUpload].
      */
     private fun copyToCache(uri: Uri): File? {
         return try {
-            val directory = File(cacheDir, "uploads/${UUID.randomUUID()}")
+            val directory = File(stagingRoot(), UUID.randomUUID().toString())
             directory.mkdirs()
             val target = File(directory, displayName(uri, "upload"))
             contentResolver.openInputStream(uri).use { input ->
@@ -139,6 +151,60 @@ class MainActivity : FlutterActivity() {
         } catch (error: Exception) {
             null
         }
+    }
+
+    /** Where picked files are staged until their upload finishes. */
+    private fun stagingRoot(): File = File(filesDir, "uploads").apply { mkdirs() }
+
+    /**
+     * Delete a staged upload once it is no longer needed.
+     *
+     * Called by the transfer engine after a successful upload, and when the
+     * user removes a task from the queue.
+     *
+     * Refuses to touch anything outside the staging root. The path arrives over
+     * a method channel, and a deletion helper that trusts its argument is one
+     * bug away from removing something the user cares about — so this checks
+     * containment rather than assuming the caller is correct.
+     */
+    private fun discardStagedUpload(path: String?, result: MethodChannel.Result) {
+        if (path.isNullOrBlank()) {
+            result.success(false)
+            return
+        }
+
+        val target = try {
+            File(path).canonicalFile
+        } catch (error: Exception) {
+            result.success(false)
+            return
+        }
+        val root = try {
+            stagingRoot().canonicalFile
+        } catch (error: Exception) {
+            result.success(false)
+            return
+        }
+
+        if (!target.path.startsWith(root.path + File.separator)) {
+            result.success(false)
+            return
+        }
+
+        val removed = try {
+            val deleted = !target.exists() || target.delete()
+            // Remove the per-pick directory too, so a long session does not
+            // leave hundreds of empty folders behind.
+            target.parentFile?.let { parent ->
+                if (parent.path.startsWith(root.path + File.separator)) {
+                    parent.delete()
+                }
+            }
+            deleted
+        } catch (error: Exception) {
+            false
+        }
+        result.success(removed)
     }
 
     /** The document's display name, falling back when the provider omits one. */
@@ -267,6 +333,50 @@ class MainActivity : FlutterActivity() {
             } catch (fallback: Exception) {
                 result.success(false)
             }
+        }
+    }
+
+    // -------------------------------------------------------------- open a URL
+
+    /**
+     * Open an https URL in whatever browser the device has.
+     *
+     * Exists so links are actually tappable. The app previously told users to
+     * long-press an address and copy it, which is a developer's workaround, not
+     * a user interface.
+     *
+     * Only http and https are allowed through: this is reachable from strings
+     * that came off the network, and forwarding an arbitrary scheme to
+     * `ACTION_VIEW` would let a remote value launch another app's deep link.
+     */
+    private fun openUrl(url: String?, result: MethodChannel.Result) {
+        if (url.isNullOrBlank()) {
+            result.success(false)
+            return
+        }
+        val parsed = try {
+            Uri.parse(url)
+        } catch (error: Exception) {
+            result.success(false)
+            return
+        }
+        val scheme = parsed.scheme?.lowercase()
+        if (scheme != "http" && scheme != "https") {
+            result.success(false)
+            return
+        }
+
+        try {
+            startActivity(
+                Intent(Intent.ACTION_VIEW, parsed).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            )
+            result.success(true)
+        } catch (error: ActivityNotFoundException) {
+            result.success(false)
+        } catch (error: Exception) {
+            result.success(false)
         }
     }
 
